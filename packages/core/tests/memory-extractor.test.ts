@@ -1,0 +1,187 @@
+import { streamText } from 'ai'
+import type { LanguageModel } from 'ai'
+
+import { extractMemoryOperations } from '../src/knowledge/memory/extractor.js'
+import type { MemoryJob } from '../src/knowledge/memory/types.js'
+
+vi.mock('ai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ai')>()
+  return { ...actual, streamText: vi.fn() }
+})
+
+function job(): MemoryJob {
+  return {
+    version: 2,
+    jobId: 'job',
+    sessionId: 'session',
+    turnStartMessageIndex: 2,
+    modelId: 'test:model',
+    repositoryId: 'D:/repo',
+    createdAt: '2026-08-02T00:00:00.000Z',
+    sourceOccurredAt: '2026-08-02T00:01:00.000Z',
+    attempt: 0,
+    explicitMemoryIntent: true,
+    projection: {
+      userMessages: ['Remember my API key sk-proj-abcdefghijklmnop and product ygy-code.'],
+      assistantFinal: 'Done.',
+      events: [],
+      changedFiles: [],
+      verification: [],
+      repositoryId: 'D:/repo',
+      turnStartedAt: '2026-08-02T00:00:00.000Z',
+      turnCompletedAt: '2026-08-02T00:01:00.000Z',
+    },
+  }
+}
+
+describe('memory extractor', () => {
+  it('uses one structured model call, redacts input, and returns bounded operations', async () => {
+    vi.mocked(streamText).mockReturnValueOnce({
+      output: Promise.resolve({
+        operations: [
+          {
+            action: 'upsert',
+            topicId: 'product',
+            factId: 'portfolio.ygy-code.identity',
+            content: '- The user owns ygy-code.',
+            evidence: [{ kind: 'explicit', sourceId: 'session', occurredAt: '2026-08-02T00:01:00.000Z' }],
+            topicPatch: {
+              type: 'portfolio',
+              description: 'User products',
+              addAliases: ['ygy-code'],
+              addKeywords: ['coding agent'],
+            },
+          },
+        ],
+      }),
+      usage: Promise.resolve({ inputTokens: 100, outputTokens: 20 }),
+    } as never)
+
+    const result = await extractMemoryOperations({
+      job: job(),
+      model: {} as LanguageModel,
+      modelId: 'deepseek:deepseek-v4-pro',
+      coreProfile: '',
+      factRegistry: '',
+      relatedTopics: [],
+    })
+    expect(result.operations).toHaveLength(1)
+    expect(result.tokens).toBe(120)
+    expect(streamText).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(vi.mocked(streamText).mock.calls[0]?.[0])).not.toContain('sk-proj-abcdefghijklmnop')
+    expect(vi.mocked(streamText).mock.calls[0]?.[0]).toMatchObject({ reasoning: 'none', temperature: 0 })
+    const payload = JSON.parse(String(vi.mocked(streamText).mock.calls[0]?.[0].prompt))
+    expect(payload.explicitMemoryIntent).toBe(true)
+    expect(payload.existingTopicIds).toEqual([])
+  })
+
+  it('rejects invalid memory identifiers before commit', async () => {
+    vi.mocked(streamText).mockReturnValueOnce({
+      output: Promise.resolve({
+        operations: [
+          {
+            action: 'upsert',
+            topicId: 'product:ygy-code',
+            factId: 'product:ygy-code:stack',
+            content: '- Uses TypeScript.',
+            evidence: [{ kind: 'explicit', sourceId: 'session', occurredAt: '2026-08-02T00:01:00.000Z' }],
+            topicPatch: {
+              type: 'portfolio',
+              description: 'User products',
+              addAliases: ['ygy-code'],
+              addKeywords: ['coding agent'],
+            },
+          },
+        ],
+      }),
+      usage: Promise.resolve({ inputTokens: 100, outputTokens: 20 }),
+    } as never)
+
+    await expect(
+      extractMemoryOperations({
+        job: job(),
+        model: {} as LanguageModel,
+        coreProfile: '',
+        factRegistry: '',
+        relatedTopics: [],
+      }),
+    ).rejects.toThrow()
+  })
+
+  it('rejects incomplete metadata for a new topic instead of losing the operation at commit', async () => {
+    vi.mocked(streamText).mockReturnValueOnce({
+      output: Promise.resolve({
+        operations: [
+          {
+            action: 'upsert',
+            topicId: 'ygy-code',
+            factId: 'ygy-code.stack',
+            content: '- Uses TypeScript.',
+            evidence: [{ kind: 'explicit', sourceId: 'session', occurredAt: '2026-08-02T00:01:00.000Z' }],
+          },
+        ],
+      }),
+      usage: Promise.resolve({ inputTokens: 100, outputTokens: 20 }),
+    } as never)
+
+    await expect(
+      extractMemoryOperations({
+        job: job(),
+        model: {} as LanguageModel,
+        coreProfile: '',
+        factRegistry: '',
+        relatedTopics: [],
+        existingTopicIds: [],
+      }),
+    ).rejects.toThrow('new topic ygy-code lacks complete topic metadata')
+  })
+
+  it('allows an existing topic update without a metadata patch', async () => {
+    vi.mocked(streamText).mockReturnValueOnce({
+      output: Promise.resolve({
+        operations: [
+          {
+            action: 'upsert',
+            topicId: 'ygy-code',
+            factId: 'ygy-code.stack',
+            content: '- Uses TypeScript.',
+            evidence: [{ kind: 'explicit', sourceId: 'session', occurredAt: '2026-08-02T00:01:00.000Z' }],
+          },
+        ],
+      }),
+      usage: Promise.resolve({ inputTokens: 100, outputTokens: 20 }),
+    } as never)
+
+    const result = await extractMemoryOperations({
+      job: job(),
+      model: {} as LanguageModel,
+      coreProfile: '',
+      factRegistry: '',
+      relatedTopics: [],
+      existingTopicIds: ['ygy-code'],
+    })
+
+    expect(result.operations).toHaveLength(1)
+  })
+
+  it('surfaces the provider stream error instead of a generic missing-output wrapper', async () => {
+    const providerError = new Error('invalid response schema')
+    vi.mocked(streamText).mockImplementationOnce((options) => {
+      options.onError?.({ error: providerError })
+      return {
+        output: Promise.reject(new Error('No output generated')),
+        usage: Promise.resolve({}),
+      } as never
+    })
+
+    await expect(
+      extractMemoryOperations({
+        job: job(),
+        model: {} as LanguageModel,
+        coreProfile: '',
+        factRegistry: '',
+        relatedTopics: [],
+      }),
+    ).rejects.toBe(providerError)
+  })
+})

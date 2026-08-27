@@ -1,0 +1,7 @@
+node_modules
+# Repository-local skills may carry non-project runtimes and are validated independently.
+.agents/skills
+dist
+coverage
+pnpm-lock.yaml
+packages/core/native/windows-job-supervisor/target

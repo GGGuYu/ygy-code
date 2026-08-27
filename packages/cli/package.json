@@ -1,0 +1,47 @@
+{
+  "name": "@ygy-code/cli",
+  "version": "0.5.2",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GGGuYu/ygy-code",
+    "directory": "packages/cli"
+  },
+  "type": "module",
+  "bin": {
+    "ygy-code": "dist/cli.js",
+    "ygy": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "node esbuild.config.js",
+    "dev": "tsx src/index.ts",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "0.1.80",
+    "@vscode/ripgrep": "^1.17.0",
+    "fs-ext-extra-prebuilt": "2.2.11",
+    "node-pty": "^1.1.0",
+    "pdf-parse": "2.4.5",
+    "tesseract.js": "7.0.0",
+    "undici": "^7.28.0"
+  },
+  "optionalDependencies": {
+    "@fugood/whisper.node": "1.1.1",
+    "@napi-audio/decoder": "0.1.0"
+  },
+  "devDependencies": {
+    "@ygy-code/core": "workspace:*",
+    "chalk": "^5.4.0",
+    "ink": "npm:@jrichman/ink@6.6.9",
+    "marked": "^17.0.1",
+    "react": "^19.1.0",
+    "shiki": "^4.4.3",
+    "yargs": "^18.0.0"
+  }
+}

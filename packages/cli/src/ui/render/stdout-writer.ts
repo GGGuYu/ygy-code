@@ -1,0 +1,584 @@
+// @ygy-code/cli — Direct-to-stdout message writer.
+//
+// Why this exists: Ink's layout engine miscalculates visual widths for wide
+// (CJK) characters, so when the Ink renderer repaints a region it can rewind
+// by the wrong number of rows and overlap previous content. This shows up as
+// "spliced bullets" and scrambled tool-result text on long Chinese responses.
+//
+// Claude Code avoids the same class of bug by vendoring a custom Ink fork
+// with a grapheme-aware stringWidth + soft-wrap metadata. We take a simpler
+// route: render message history OUTSIDE of Ink entirely by writing raw ANSI
+// to stdout via the `write` function returned from Ink's `useStdout()` hook.
+// That function is documented as "similar to <Static>, except … it only
+// works with strings" — it goes through Ink's internal writeToStdout which
+// properly coordinates with log-update (clear dynamic region → write →
+// re-render). We avoid `console.log` + `patchConsole` because the patch
+// library's internal string handling has been observed to drop content on
+// very large multi-line writes.
+//
+// Ink still owns the bottom-of-screen dynamic region (spinner, in-progress
+// tool call, permission dialog, chat input). That region is short and
+// mostly ASCII, so Ink's own measurement is good enough.
+import { debugLog, stripTerminalControls } from '@ygy-code/core'
+import type { DisplayMessage, DisplayToolCall } from '@ygy-code/core'
+
+import { authorityVisibleText } from '../chat-input/authority-display.js'
+import {
+  RESULT_INDENT,
+  formatDuration,
+  formatReadGroupSummary,
+  getToolInputPreview,
+  getToolLabel,
+  getToolResultSummary,
+  isCollapsibleReadOnlyTool,
+  isShellToolName,
+  normalizeLineEndings,
+} from '../utils.js'
+import { renderEditDiff } from './render-diff.js'
+import { renderInlineMarkdown, renderMarkdown } from './render-markdown.js'
+import { highlightShellCommand } from './shiki-highlight.js'
+import { GLYPH_ELLIPSIS, GLYPH_PROMPT_ARROW, GLYPH_RESULT_BRACKET, GLYPH_TOOL_BULLET } from './terminal-glyphs.js'
+import { sliceByWidth, visualWidth } from './text-width.js'
+import { chalk as c, paint, paintEchoArrow, paintEchoBg, paintEchoFg } from './tokens.js'
+
+/** Function that writes to stdout through Ink's log-update coordination. */
+export type InkWrite = (data: string) => void
+
+/**
+ * Truncate `s` so it fits visually in `maxLen` printable cells. We use a
+ * UTF ellipsis (…) as the truncation marker — single cell, looks
+ * tighter than three dots, matches CC's truncated previews.
+ */
+function truncatePreview(s: string, maxLen: number): string {
+  if (maxLen < 4 || s.length <= maxLen) return s
+  return s.slice(0, maxLen - 1) + GLYPH_ELLIPSIS
+}
+
+function formatToolCall(tc: DisplayToolCall): string {
+  const label = authorityVisibleText(getToolLabel(tc.toolName))
+  const rawPreview = authorityVisibleText(getToolInputPreview(tc.toolName, tc.input))
+  // Cap the preview so long Bash commands / file paths don't wrap into a
+  // ragged multi-line block in scrollback. Compute the budget against the
+  // terminal width so wide terminals get more room. The line1 prefix is
+  // ` ● <label>(` and we close with `)`, so reserve label.length + 5 cells
+  // for decoration; leave a small safety margin for the trailing
+  // `\x1b[K` / cursor positioning the terminal may add.
+  const cols = Math.max(40, process.stdout.columns ?? 120)
+  const decoration = label.length + 5
+  const safetyMargin = 4
+  const maxPreviewLen = Math.max(40, cols - decoration - safetyMargin)
+  const inputPreview = truncatePreview(rawPreview, maxPreviewLen)
+  const rawResultSummary = getToolResultSummary(tc.toolName, tc.output, tc.status)
+  const resultSummary = rawResultSummary === null ? null : stripTerminalControls(rawResultSummary)
+  const isDenied = tc.status === 'denied'
+  const isError = tc.status === 'error'
+  const isFailure = isDenied || isError
+  const durationStr = tc.durationMs != null ? formatDuration(tc.durationMs) : null
+
+  const dotStyle = paint(isFailure ? 'error' : 'success')
+  // Shell commands get codex-style syntax highlighting (their `Ran …`
+  // rows route the command through syntect's bash grammar): strings,
+  // option flags and variables pick up syntax colors while the command
+  // words stay on the terminal default fg. Other tools keep the flat
+  // primary-blue preview. Parens stay primary in both cases.
+  //
+  // Failed (denied/errored) calls skip highlighting: their preview went
+  // through authorityVisibleText to make terminal-injection bytes VISIBLE,
+  // and interleaving SGR color runs would split that sanitized text apart
+  // — the user must see the escape attempt as one contiguous string.
+  const previewSuffix = inputPreview
+    ? isShellToolName(tc.toolName) && !isFailure
+      ? `${paint('primary')('(')}${highlightShellCommand(inputPreview)}${paint('primary')(')')}`
+      : paint('primary')(`(${inputPreview})`)
+    : ''
+  const line1 = ` ${dotStyle(GLYPH_TOOL_BULLET)} ${c.bold(label)}${previewSuffix}`
+
+  // Edit / writeFile success path: render the structured diff under the
+  // bullet INSTEAD of the plain "Wrote N lines" / "Applied changes" summary.
+  // We only take this branch when the tool actually succeeded — failed
+  // edits keep the regular markdown summary so the red error message lands
+  // where the user expects to read it.
+  if (tc.editPayload && !isFailure) {
+    const cols = Math.max(40, process.stdout.columns ?? 120)
+    const diffLines = renderEditDiff(tc.editPayload, cols)
+    const head = `   ${c.gray(GLYPH_RESULT_BRACKET)}  ${diffLines[0] ?? ''}`
+    const body = diffLines.slice(1)
+    const durSuffix = durationStr ? c.gray(` (${durationStr})`) : ''
+    const combined = body.length > 0 ? [head, ...body] : [head]
+    combined[combined.length - 1] = combined[combined.length - 1] + durSuffix
+    return `${line1}\n${combined.join('\n')}`
+  }
+
+  if (!resultSummary) return line1
+
+  // Render the result through the markdown pipeline so tool outputs with
+  // headings / lists / inline code / etc. display styled instead of as
+  // raw `### ...` / `**...**` characters. Denied AND errored results
+  // render as plain red text so failures stand out in scrollback —
+  // matches Claude Code's behavior of coloring the stderr/exit-code
+  // block in red for non-zero shell exits.
+  const rendered = isFailure ? resultSummary : renderMarkdown(resultSummary).replace(/\n+$/, '')
+
+  // Strip blank lines — markdown rendering inserts paragraph spacing
+  // between blocks, which makes the tool-result summary look sparse
+  // (heading, blank, URL, blank, "... +7 lines"). We want a tight
+  // 2-3 line summary, not a paragraphed body.
+  const lines = normalizeLineEndings(rendered)
+    .split('\n')
+    .filter((l) => l.trim().length > 0)
+  const durSuffix = durationStr ? c.gray(` (${durationStr})`) : ''
+  // Errored lines get the ERROR hex color applied AFTER line splitting —
+  // applying it before splitting would split on ANSI-reset sequences
+  // embedded mid-style and leave half the body uncolored. Apply per line.
+  const paintLine = isFailure ? paint('error') : (s: string) => s
+  const head = `   ${c.gray(GLYPH_RESULT_BRACKET)}  ${paintLine(lines[0] ?? '')}`
+  const tail = lines.slice(1).map((l) => `${RESULT_INDENT}${paintLine(l)}`)
+  // Duration goes on the last visible line of the body so it reads like
+  // "... +13 lines (1.2s)" on truncated summaries.
+  const combined = tail.length > 0 ? [head, ...tail] : [head]
+  combined[combined.length - 1] = combined[combined.length - 1] + durSuffix
+  return `${line1}\n${combined.join('\n')}`
+}
+
+/** Replace every LF with CRLF. Defensive against terminals where stdout's
+ *  ONLCR output translation is disabled (Ink puts stdin into raw mode but
+ *  stdout's termios settings can be implementation-dependent, and VS Code
+ *  terminal in particular has been observed to not translate bare LF into
+ *  CRLF). Without an explicit `\r`, the cursor stays at whatever column
+ *  the line ended on, and the following cell-buffer repaint positions at
+ *  col 1 via `\x1b[1G` — overwriting only the first few columns and
+ *  leaving the tail of the just-written text visible "to the right of"
+ *  the next row's content (looks like partial text next to Working). */
+function toCRLF(s: string): string {
+  return s.replace(/\r?\n/g, '\r\n')
+}
+
+/**
+ * Has the previous scrollback write left a fully blank row below its last
+ * line of content? Used to keep the spacing between adjacent entities at
+ * exactly one blank row regardless of which entity wrote first.
+ *
+ * Why we need this flag: streaming text chunks each end with a single
+ * `\n` (cursor on the next row, no trailing blank) so a tool call that
+ * commits right after a stream would butt against the text. User
+ * messages and finalized tool/text writes already leave a trailing
+ * blank, so back-to-back blocks don't need any extra spacer. The flag
+ * lets the next entity decide: if the previous write didn't already
+ * draw a blank below itself, prepend one; otherwise don't.
+ *
+ * Initialized to `true` so the very first write of a session doesn't
+ * draw a leading blank row at the top of the terminal.
+ */
+let prevWriteEndedWithBlankRow = true
+
+/**
+ * Was the previous write a streaming text chunk? When the next write is
+ * ALSO a streaming chunk we treat it as a continuation of the same
+ * assistant message and do NOT prepend the leading-blank that the
+ * `prevWriteEndedWithBlankRow` machinery would otherwise add. Each
+ * streaming chunk ends with a single `\n` (no trailing blank), so without
+ * this guard the blank gets injected at every chunk boundary — and since
+ * the stream buffer flushes on cadence rather than markdown structure,
+ * those boundaries fall between adjacent list items / paragraph lines
+ * and produce visible inter-line gaps where the model emitted none.
+ */
+let prevWriteWasStreamingChunk = false
+
+/** Reset the spacing flag — call when the scrollback is cleared (e.g.
+ *  /clear) so the next write doesn't think there's still a blank above.
+ *  Also drops any buffered read-group entries: post-/clear they refer to
+ *  pre-clear messages that are no longer in scrollback, so committing
+ *  their summary would leave a phantom row above the now-empty history. */
+export function resetScrollbackSpacing(): void {
+  prevWriteEndedWithBlankRow = true
+  prevWriteWasStreamingChunk = false
+  pendingReadGroup = []
+}
+
+/** Did the most recent scrollback write leave a fully blank row below its
+ *  last line of content? Read by ChatInput's frame builder so the live
+ *  tool/spinner block can apply the SAME leading-blank rule that the
+ *  committed-tool path uses — without it, the live frame draws flush
+ *  against streaming text and the blank "appears" only when the tool
+ *  finishes (a visible spacing jump). */
+export function lastWriteEndedWithBlankRow(): boolean {
+  return prevWriteEndedWithBlankRow
+}
+
+/** Pending buffer of consecutive completed read-only tool calls. Holds
+ *  Read / Glob / Grep / ListDir (`isCollapsibleReadOnlyTool`) rows that
+ *  arrived back-to-back so we can fold them into a single
+ *  `● Read 3 files (foo.ts, bar.ts, baz.ts)` summary line.
+ *
+ *  Why a module-level buffer rather than a render-time transform:
+ *  scrollback is append-only terminal history — once a row is written
+ *  via `process.stdout.write` it can't be rewritten. Claude Code does
+ *  this transform purely at render time because Ink owns its entire
+ *  transcript and re-renders on every state change; we don't have that
+ *  affordance, so the only way to "merge" is to delay committing the
+ *  individual rows until we know whether more will follow.
+ *
+ *  Flush is triggered when (a) any non-collapsible message hits
+ *  `writeMessageToStdout` (assistant text, write tool, user message —
+ *  these break the chain) or (b) `flushPendingReadGroup` is called
+ *  externally, e.g. ChatInput's commit pass at end-of-turn.
+ *
+ *  Consequence the user can perceive: a single isolated read tool
+ *  doesn't appear in scrollback until the assistant emits its closing
+ *  text (or the turn ends). The live tool indicator covers the gap
+ *  while the chain runs, so the delay is invisible during normal flow.
+ *  Tradeoff is acceptable for the win on multi-read chains, which are
+ *  the noisy case that motivated this. */
+let pendingReadGroup: DisplayToolCall[] = []
+
+/** True when `msg` is a single-message bundle of completed, non-edit,
+ *  read-only tool calls and nothing else (no assistant text, no command
+ *  kind). Such messages are buffer-eligible — anything else flushes the
+ *  buffer first and renders normally. */
+function isCollapsibleMessage(msg: DisplayMessage): boolean {
+  if (msg.role !== 'assistant') return false
+  if (msg.content) return false
+  if (msg.kind) return false
+  if (!msg.toolCalls || msg.toolCalls.length === 0) return false
+  return msg.toolCalls.every(
+    (tc) => tc.status === 'completed' && !tc.editPayload && isCollapsibleReadOnlyTool(tc.toolName),
+  )
+}
+
+/** Render one tool row (single-tool flush path) — same shape as
+ *  `formatToolCall` produces inside `writeMessageToStdout`'s tool loop.
+ *  Extracted so flush can reuse it without re-deriving the prepend-blank
+ *  rule. */
+function writeToolRow(write: InkWrite, tc: DisplayToolCall): void {
+  const lead = prevWriteEndedWithBlankRow ? '' : '\n'
+  write(toCRLF(lead + normalizeLineEndings(formatToolCall(tc)) + '\n'))
+  prevWriteEndedWithBlankRow = false
+  prevWriteWasStreamingChunk = false
+}
+
+/** Render the collapsed-group summary line, e.g.
+ *    ` ● Read 3 files (foo.ts, bar.ts, baz.ts)`
+ *  Format mirrors a regular tool row so the visual rhythm is preserved:
+ *  green bullet (all members are completed), bold label, primary
+ *  paren'd detail. No `⎿` result body — the whole point of collapsing
+ *  is to drop the per-call result rows. */
+function writeCollapsedGroup(write: InkWrite, tools: readonly DisplayToolCall[]): void {
+  const { label, detail } = formatReadGroupSummary(tools)
+  const detailSuffix = detail ? paint('primary')(`(${authorityVisibleText(detail)})`) : ''
+  const line = ` ${paint('success')(GLYPH_TOOL_BULLET)} ${c.bold(authorityVisibleText(label))}${detailSuffix}`
+  const lead = prevWriteEndedWithBlankRow ? '' : '\n'
+  write(toCRLF(lead + line + '\n'))
+  prevWriteEndedWithBlankRow = false
+  prevWriteWasStreamingChunk = false
+}
+
+/** Commit any buffered consecutive read-only tool calls to scrollback.
+ *  Single tool → renders as a normal tool row (with its result body, so
+ *  isolated reads don't lose their result blurb). Two or more → folds
+ *  into one summary line. Idempotent — safe to call when buffer empty.
+ *
+ *  Called automatically at the top of `writeMessageToStdout` for every
+ *  non-collapsible message, and externally by ChatInput's commit pass
+ *  when `isLoading` is false (so a chain that ends without a closing
+ *  text message — e.g. user abort — still gets its summary committed
+ *  rather than left dangling in the buffer). */
+export function flushPendingReadGroup(write: InkWrite): void {
+  if (pendingReadGroup.length === 0) return
+  const buffered = pendingReadGroup
+  pendingReadGroup = []
+  if (buffered.length === 1) {
+    writeToolRow(write, buffered[0]!)
+  } else {
+    writeCollapsedGroup(write, buffered)
+  }
+}
+
+/** Print a DisplayMessage to stdout. */
+export function writeMessageToStdout(write: InkWrite, msg: DisplayMessage): void {
+  if (msg.content) {
+    msg = { ...msg, content: stripTerminalControls(msg.content) }
+  }
+  if (msg.kind === 'peer-message' || msg.kind === 'peer-status') {
+    msg = {
+      ...msg,
+      ...(msg.peer
+        ? {
+            peer: {
+              name: stripTerminalControls(msg.peer.name),
+              address: stripTerminalControls(msg.peer.address),
+              ...(msg.peer.summary === undefined ? {} : { summary: stripTerminalControls(msg.peer.summary) }),
+            },
+          }
+        : {}),
+    }
+  }
+  // Read-group buffering: a message that bundles only completed,
+  // non-edit, read-only tool calls is held in `pendingReadGroup` until
+  // the next non-collapsible message arrives or `flushPendingReadGroup`
+  // is called externally. The flush at the top of every other branch
+  // commits any accumulated reads BEFORE the current message renders,
+  // so chain summaries land in correct scrollback order
+  // (` ● Read 3 files` above ` …final assistant text`).
+  if (isCollapsibleMessage(msg)) {
+    for (const tc of msg.toolCalls!) pendingReadGroup.push(tc)
+    return
+  }
+  flushPendingReadGroup(write)
+
+  if (msg.kind === 'peer-message') {
+    const content = normalizeLineEndings(msg.content)
+    const peer = msg.peer
+    const heading = peer ? `Peer message · ${peer.name} · ${peer.address}` : 'Peer message'
+    const summary = peer?.summary ? `\n   ${c.gray(`Summary: ${peer.summary}`)}` : ''
+    const body = content
+      .split('\n')
+      .map((line) => `   ${line}`)
+      .join('\n')
+    const lead = prevWriteEndedWithBlankRow ? '' : '\n'
+    write(toCRLF(`${lead} ${paint('warning')(GLYPH_TOOL_BULLET)} ${c.bold(heading)}${summary}\n${body}\n\n`))
+    prevWriteEndedWithBlankRow = true
+    prevWriteWasStreamingChunk = false
+    return
+  }
+
+  if (msg.kind === 'peer-status') {
+    const content = normalizeLineEndings(msg.content)
+    write(toCRLF(`   ${c.gray(GLYPH_RESULT_BRACKET)}  ${renderInlineMarkdown(content)}\n`))
+    prevWriteEndedWithBlankRow = false
+    prevWriteWasStreamingChunk = false
+    return
+  }
+
+  if (msg.role === 'user') {
+    const content = normalizeLineEndings(msg.content)
+    debugLog('stdout.user', content)
+    writeUserMessage(write, content, msg.kind === 'command-echo')
+    // writeUserMessage always emits a trailing `\n\n` (or `\n` for the
+    // compact slash-echo) — in both cases the next entity will sit on a
+    // fresh row with the preceding blank already in place.
+    prevWriteEndedWithBlankRow = msg.kind !== 'command-echo'
+    prevWriteWasStreamingChunk = false
+    return
+  }
+
+  // Compact slash-command result — render as a tight `   ⎿  text` line so the
+  // pair `> /cmd` + result shows up as the Claude-style 2-line block instead
+  // of command + blank + indented body + blank. The 3-space prefix matches
+  // formatToolCall's result-block indent, so standalone notices that reuse
+  // this kind (background-shell lifecycle lines, compression summaries,
+  // interrupts) keep their ⎿ aligned with the tool block above them instead
+  // of shifting one cell left; head text then lands exactly at RESULT_INDENT
+  // like the tail lines.
+  //
+  // Body lines go through `renderInlineMarkdown` so `**name**` / `` `code` `` /
+  // `_italic_` markers our slash-command handlers emit display styled rather
+  // than as raw `**` / backtick characters. We deliberately do NOT wrap the
+  // body in `c.gray(...)` even though that's the conventional "secondary
+  // info" tint: the gray base dims everything inside it (incl. bold and
+  // truecolor inline-code), so the markdown rendering visually disappears
+  // — bold gray-on-gray reads as just gray, and the blue-purple inline-code
+  // color loses its contrast against a gray surround. The `⎿` glyph stays
+  // gray as the structural marker; body content uses the terminal default
+  // foreground so bold + inline-code stand out against it.
+  if (msg.kind === 'command-result' && msg.content) {
+    const content = normalizeLineEndings(msg.content)
+    debugLog('stdout.command-result', content)
+    const lines = content.split('\n')
+    const head = `   ${c.gray(GLYPH_RESULT_BRACKET)}  ${renderInlineMarkdown(lines[0] ?? '')}`
+    const tail = lines.slice(1).map((l) => `${RESULT_INDENT}${renderInlineMarkdown(l)}`)
+    write(toCRLF([head, ...tail].join('\n') + '\n'))
+    prevWriteEndedWithBlankRow = false
+    prevWriteWasStreamingChunk = false
+    return
+  }
+
+  // Assistant message — may have tool calls, a text body, or both.
+  if (msg.toolCalls && msg.toolCalls.length > 0) {
+    for (const tc of msg.toolCalls) {
+      debugLog('stdout.tool-call-line', `${tc.toolName} ${tc.status}`)
+      // Prepend a `\n` if the previous write (most often the final
+      // streaming-chunk of an assistant text body) didn't leave a blank
+      // row below it. Without this guard, text→tool transitions paste
+      // the bullet row directly under the text — exactly the "no
+      // breathing room above the tool" issue the user flagged. After
+      // writes that already ended with `\n\n` the flag is true and we
+      // skip the leading newline so we don't double-blank.
+      const lead = prevWriteEndedWithBlankRow ? '' : '\n'
+      write(toCRLF(lead + normalizeLineEndings(formatToolCall(tc)) + '\n'))
+      prevWriteEndedWithBlankRow = false
+      prevWriteWasStreamingChunk = false
+    }
+  }
+
+  if (msg.content) {
+    const content = normalizeLineEndings(msg.content)
+    debugLog(msg.streamingChunk ? 'stdout.assistant-chunk' : 'stdout.assistant-full', content)
+    // Skip the leading-blank when this chunk is continuing a previous
+    // streaming chunk from the same assistant message — the prior chunk
+    // already left the cursor on the next row via its trailing `\n`,
+    // and prepending another `\n` would render as a visible blank
+    // between adjacent list items / paragraph lines whose only
+    // separator in the model's source was a single newline. The blank
+    // is still added on text→text transitions across non-streaming
+    // entities (tool result → final text) so nothing butts together.
+    const isStreamContinuation = !!msg.streamingChunk && prevWriteWasStreamingChunk
+    if (!prevWriteEndedWithBlankRow && !isStreamContinuation) {
+      write(toCRLF('\n'))
+      prevWriteEndedWithBlankRow = true
+    }
+
+    // Special-case pure-whitespace streaming chunks (e.g. a bare "\n"
+    // = paragraph break marker between two lines of prose). Markdown
+    // rendering collapses these to an empty string, which would drop
+    // the visual paragraph break — so pass the whitespace through
+    // directly instead.
+    if (msg.streamingChunk && content.trim() === '') {
+      // A bare paragraph-break token. It already encodes a blank line
+      // (whitespace-only `\n` or `\n\n`); after writing it the cursor
+      // sits below a blank row, so the next entity doesn't need to
+      // prepend another one.
+      write(toCRLF(content))
+      prevWriteEndedWithBlankRow = content.endsWith('\n\n') || content.endsWith('\n')
+      prevWriteWasStreamingChunk = true
+      return
+    }
+
+    // Two-space indent matches the assistant body spacing used throughout.
+    const body = renderMarkdown(content)
+    const indented = normalizeLineEndings(body)
+      .split('\n')
+      .map((line) => (line ? `  ${line}` : line))
+      .join('\n')
+    if (msg.streamingChunk) {
+      // Streaming chunks carry their own trailing newline(s) — renderMarkdown
+      // emits "line\n" for list items, "line\n" for headings, and "line\n\n"
+      // when a block is followed by a paragraph-break space token. The
+      // indented `  ${line}` mapping preserves those trailing \ns as-is.
+      //
+      // We MUST ensure the chunk ends in at least one \n so the cursor
+      // advances to the next row: the subsequent frame redraw starts from
+      // wherever writeMessage left the cursor, and if we emit text without
+      // a newline, the next row-0 of the frame overwrites the chunk text.
+      // Belt-and-suspenders: append one \n if renderMarkdown returned a
+      // trailing-newline-less body (theoretically possible for unknown
+      // token shapes or the catch-fallback plain-text path).
+      const out = indented.endsWith('\n') ? indented : indented + '\n'
+      write(toCRLF(out))
+      // A streaming chunk that ends with `\n\n` is a paragraph-break
+      // boundary (renderMarkdown puts \n\n after a heading + blank line
+      // pair, etc.) — the next entity sits below a real blank row.
+      // Anything else only ended with a single `\n`, so we still need
+      // the next entity to draw its own blank above.
+      prevWriteEndedWithBlankRow = out.endsWith('\n\n')
+      prevWriteWasStreamingChunk = true
+    } else {
+      // renderMarkdown already terminates block output with one or more
+      // newlines. Normalize that suffix before adding the single blank row
+      // that separates scrollback content from the next input frame.
+      write(toCRLF(indented.replace(/\n+$/, '') + '\n\n'))
+      prevWriteEndedWithBlankRow = true
+      prevWriteWasStreamingChunk = false
+    }
+  }
+}
+
+/**
+ * Echo a user message in full. For multi-line content we indent continuation
+ * lines so they align under the text that followed the `›` prompt glyph on
+ * the first line. `content` is assumed to have already been normalized to
+ * use `\n` line separators.
+ *
+ * Each line gets a subtle full-row background (padding painted INSIDE the
+ * bg span) so questions read as solid blocks next to the assistant's
+ * markdown — codex-rs does the same via `user_message_style`. The block
+ * gets breathing room beyond the text: one full-width bg row above and
+ * below as vertical padding, plus a one-cell inset left of the `›`. On
+ * *-ansi themes and under NO_COLOR `paintEchoBg()` returns null and we
+ * fall back to bold text instead of forcing a hex bg onto the terminal's
+ * own palette.
+ *
+ * `compact` is set for slash-command echoes: we drop the trailing blank
+ * line so the `  ⎿  result` line that follows sits directly under the
+ * echo's bottom padding row, matching Claude Code's 2-line command block.
+ */
+function writeUserMessage(write: InkWrite, content: string, compact = false): void {
+  const bg = paintEchoBg()
+  const cols = process.stdout.columns ?? 0
+  const arrow = paint('border')(GLYPH_PROMPT_ARROW)
+  const lines = content.split('\n')
+  const [first = '', ...rest] = lines
+  if (!bg) {
+    const body = [`${arrow} ${c.bold(first)}`, ...rest.map((line) => `  ${c.bold(line)}`)].join('\n')
+    const trailing = compact ? '\n' : '\n\n'
+    write(toCRLF('\n' + body + trailing))
+    return
+  }
+  // The card is theme-independent, so its content is too: fixed light
+  // arrow + text (see paintEchoArrow/paintEchoFg in tokens.ts) — in
+  // light themes the terminal default fg is dark and would vanish on the
+  // dark card.
+  const bgArrow = paintEchoArrow()(GLYPH_PROMPT_ARROW)
+  const echoText = paintEchoFg()
+  // Both prefixes are 3 cells wide (` › ` / three spaces), so wrapped
+  // continuation rows align under the first row's text.
+  const PREFIX_CELLS = 3
+  // The card's bg band reaches the right edge via `\x1b[K` emitted INSIDE
+  // the bg span: on BCE-capable terminals (xterm.js, WT, conhost) the erase
+  // fills with the card color. We deliberately do NOT pad with bg-colored
+  // spaces — a padded row is printable up to the OLD terminal width, so
+  // when the terminal narrows later its scrollback reflow splits every
+  // padded row into content + a stray bg-colored blank row (one phantom
+  // line per card row). On a non-BCE terminal the card simply ends after
+  // the text.
+  //
+  // We still never let a PRINTABLE cell land in the terminal's last
+  // column: a row exactly `cols` wide enters delayed-wrap state, and
+  // conhost / Windows Terminal in some configurations count that as a real
+  // wrap, inserting a phantom row the scrollback geometry
+  // (countContentRows) doesn't know about — the live frame then drifts and
+  // tears into a duplicated input box above (render-diff.ts reserves the
+  // same 1-cell margin for its diff rows).
+  const paintRow = (chunk: string, isFirst: boolean): string => {
+    const visible = isFirst ? ` ${bgArrow} ${echoText(chunk)}` : `   ${echoText(chunk)}`
+    return cols > 0 ? bg(visible + '\x1b[K') : bg(visible)
+  }
+  // Hard-wrap over-wide lines ourselves instead of leaving them to the
+  // terminal's auto-wrap: splitting at a known budget keeps
+  // countContentRows' scrollback accounting exact — no reliance on the
+  // terminal wrapping where we think. Lines containing tabs skip wrapping
+  // entirely: charWidth counts `\t` as 1 cell but the terminal jumps to
+  // the next 8-col stop, so any computed wrap point would be wrong.
+  const renderLine = (text: string, isFirst: boolean): string[] => {
+    if (cols <= 0 || text.includes('\t')) return [paintRow(text, isFirst)]
+    const budget = Math.max(1, cols - 1 - PREFIX_CELLS)
+    if (visualWidth(text) <= budget) return [paintRow(text, isFirst)]
+    const chunks: string[] = []
+    let remaining = text
+    while (visualWidth(remaining) > budget) {
+      const head = sliceByWidth(remaining, budget)
+      // budget >= 1 makes an empty head impossible for non-empty input;
+      // the break is pure insurance against an infinite loop.
+      if (head.length === 0) break
+      chunks.push(head)
+      remaining = remaining.slice(head.length)
+    }
+    chunks.push(remaining)
+    return chunks.map((chunk, i) => paintRow(chunk, isFirst && i === 0))
+  }
+  // Full-width blank bg rows as vertical padding. Keep one printable space
+  // inside the bg span before the BCE erase: terminals may discard the
+  // background attributes of erase-only rows during resize/reflow, which
+  // makes the card's top and bottom padding disappear. One cell anchors the
+  // row without restoring old-width space padding (and its phantom wraps).
+  // Skipped when the terminal width is unknown (piped output).
+  const padRow = cols > 0 ? bg(' \x1b[K') : null
+  const rows = lines.flatMap((line, i) => renderLine(line, i === 0))
+  if (padRow !== null) rows.unshift(padRow)
+  if (padRow !== null) rows.push(padRow)
+  const body = rows.join('\n')
+  // Leading \n gives one blank row of margin-top so the echo doesn't
+  // crowd against the previous assistant reply's last line of content.
+  // Explicit CRLF line breaks — see toCRLF() above for rationale.
+  const trailing = compact ? '\n' : '\n\n'
+  write(toCRLF('\n' + body + trailing))
+}

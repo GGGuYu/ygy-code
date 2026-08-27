@@ -1,0 +1,336 @@
+<div align="center">
+
+# ygy-code
+
+**A model-agnostic coding agent CLI with Claude Code-compatible extensions.**
+
+Use Claude, GPT, Gemini, DeepSeek, Qwen, Kimi, or any OpenAI-compatible model in one open-source agent workflow.
+
+[![npm version](https://img.shields.io/npm/v/@ygy-code/cli)](https://www.npmjs.com/package/@ygy-code/cli)
+[![license](https://img.shields.io/github/license/GGGuYu/ygy-code)](./LICENSE)
+
+English · [简体中文](./README.zh-CN.md)
+
+![](./assets/hello.en.png)
+
+</div>
+
+## Why ygy-code?
+
+**Model agnostic** — Switch providers at any time with `/model`, or connect any OpenAI-compatible endpoint. One workflow, any model.
+
+**Claude Code-compatible extensions** — Reuse plugins, skills, sub-agents, MCP servers, and hooks built for Claude Code. The plugin loader recognizes both `.ygy-code-plugin/` and `.claude-plugin/` formats.
+
+**Open and controllable** — Open source, BYOK, local execution, configurable 3-level permission model. You decide what the agent can do.
+
+**Complete agent runtime** — More than a chat wrapper: it covers planning, execution, memory, context management, and task verification.
+
+> ygy-code is an independent open-source project and is not affiliated with Anthropic.
+
+## Install
+
+> Requires **Node.js >= 22** (Node 20 is not supported).
+
+```bash
+npm install -g @ygy-code/cli
+
+# Or
+pnpm add -g @ygy-code/cli
+```
+
+After installation, launch with the `ygy` or `ygy-code` command.
+
+## Configure Model Access
+
+For OpenAI models, you can sign in with ChatGPT to use your subscription:
+
+```bash
+ygy login                    # Browser sign-in, then enter the interactive product
+ygy login --device-auth      # Device sign-in, then enter the interactive product
+ygy login status             # Show the active OpenAI authentication method
+ygy logout                   # Sign out and remove the stored ChatGPT credentials
+```
+
+On an interactive terminal, a successful `ygy login` (including `--device-auth`) continues directly into ygy-code. Inside the product, use `/login`, `/login --device-auth`, `/login status`, and `/logout` for the same authentication lifecycle.
+
+ChatGPT login and `OPENAI_API_KEY` are mutually exclusive for the `openai` provider. While ChatGPT is signed in, requests use ChatGPT subscription access; the API key is inactive and is never used as a fallback. After `ygy logout`, an existing `OPENAI_API_KEY` becomes active again and its requests are billed through the OpenAI Platform account. API keys for every other provider are unaffected.
+
+The current release stores ChatGPT tokens in a plaintext credential file under `~/.ygy-code/auth/` (or `YGY_CODE_HOME`). Treat that file like a password: keep the directory private and do not commit, share, or synchronize it to an untrusted location. System-keyring storage is not implemented yet.
+
+Alternatively, configure at least one provider API key:
+
+> **Recommended: [DeepSeek](https://platform.deepseek.com/)** — affordable and capable enough for everyday coding. Promotional credits and prices can change; check the official console for current terms.
+
+| Variable                       | Provider           | Sign up                                                                     |
+| ------------------------------ | ------------------ | --------------------------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`            | Anthropic (Claude) | [console.anthropic.com](https://console.anthropic.com/)                     |
+| `OPENAI_API_KEY`               | OpenAI (GPT)       | [platform.openai.com/api-keys](https://platform.openai.com/api-keys)        |
+| `DEEPSEEK_API_KEY`             | DeepSeek           | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)    |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | Google (Gemini)    | [aistudio.google.com/apikey](https://aistudio.google.com/apikey)            |
+| `ALIBABA_API_KEY`              | Alibaba (Qwen)     | [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com/apiKey) |
+| `XAI_API_KEY`                  | xAI (Grok)         | [console.x.ai](https://console.x.ai/)                                       |
+| `ZHIPU_API_KEY`                | Zhipu (GLM)        | [open.bigmodel.cn](https://open.bigmodel.cn/usercenter/apikeys)             |
+| `MOONSHOT_API_KEY`             | Moonshot (Kimi)    | [Choose a service](#moonshot-kimi-endpoints)                                |
+
+**OpenAI-compatible escape hatch** (vLLM / OpenRouter / internal gateways): set both `OPENAI_COMPATIBLE_API_KEY` and `OPENAI_COMPATIBLE_BASE_URL`, then address models as `custom:<your-model-id>`.
+
+<details>
+<summary><b>Shell configuration examples</b> (click to expand)</summary>
+
+The examples below use `DEEPSEEK_API_KEY`; substitute your provider's variable name.
+
+**bash (Linux / Git Bash / WSL)**
+
+```bash
+echo 'export DEEPSEEK_API_KEY=sk-...' >> ~/.bashrc
+source ~/.bashrc
+```
+
+**zsh (macOS default)**
+
+```bash
+echo 'export DEEPSEEK_API_KEY=sk-...' >> ~/.zshrc
+source ~/.zshrc
+```
+
+**fish**
+
+```fish
+set -Ux DEEPSEEK_API_KEY sk-...
+```
+
+**Windows PowerShell (user-level, persistent)**
+
+```powershell
+[Environment]::SetEnvironmentVariable('DEEPSEEK_API_KEY', 'sk-...', 'User')
+# Restart PowerShell to take effect
+```
+
+**Windows CMD (user-level, persistent)**
+
+```cmd
+setx DEEPSEEK_API_KEY "sk-..."
+:: Restart CMD to take effect
+```
+
+> For temporary use: `export X=...` (bash) or `$env:X = '...'` (PowerShell); discarded when the terminal closes.
+>
+> Per-project: place a `.env` file in or above the launch directory. `ygy` walks upward and loads only the first file it finds.
+
+</details>
+
+<details>
+<summary><b>Web search keys (optional)</b></summary>
+
+To enable the `webSearch` tool, configure any one of the following:
+
+| Variable             | Provider                                                   | Current free quota      | Signup         |
+| -------------------- | ---------------------------------------------------------- | ----------------------- | -------------- |
+| `TAVILY_API_KEY`     | [Tavily](https://tavily.com)                               | 1,000 API credits/month | Email, no card |
+| `BRAVE_API_KEY`      | [Brave Search](https://brave.com/search/api/)              | — (paid)                | Card required  |
+| `EXA_API_KEY`        | [Exa](https://exa.ai)                                      | 1,000 requests/month    | Email, no card |
+| `PERPLEXITY_API_KEY` | [Perplexity Sonar](https://www.perplexity.ai/settings/api) | — (paid)                | Card required  |
+| `FIRECRAWL_API_KEY`  | [Firecrawl](https://firecrawl.dev)                         | Free credits tier       | Email, no card |
+
+> Tavily is recommended for first-time setup: simpler signup, LLM-optimized responses. When several keys are set, the first in the table order above wins. Set `YGY_CODE_WEB_SEARCH_PROVIDER` to `tavily`, `brave`, `exa`, `perplexity`, `firecrawl`, or `deepseek` to force a specific provider.
+>
+> **DeepSeek users need no extra key**: when the active model is a DeepSeek model and `DEEPSEEK_API_KEY` is set, `webSearch` automatically uses DeepSeek's built-in server-side web search. Note that each search is billed as a model turn (default `deepseek-v4-flash`), not as a flat search request.
+
+</details>
+
+<details id="moonshot-kimi-endpoints">
+<summary><b>Moonshot (Kimi) endpoint note</b></summary>
+
+Moonshot/Kimi credentials come from three separate services. A key only works with the endpoint of the service that issued it:
+
+- Kimi Code plan: [Kimi Code console](https://www.kimi.com/code/console) → `https://api.kimi.com/coding/v1`
+- China Open Platform: [platform.kimi.com](https://platform.kimi.com/console/api-keys) → `https://api.moonshot.cn/v1`
+- International Open Platform: [platform.kimi.ai](https://platform.kimi.ai/console/api-keys) → `https://api.moonshot.ai/v1`
+
+After selecting a Kimi model via `/model`, an endpoint picker appears automatically.
+
+</details>
+
+## Quick Start
+
+```bash
+cd your-project
+
+ygy                                              # Interactive session
+ygy "Explain the overall architecture"           # Run with a prompt
+ygy -m sonnet "Refactor the formatDate function" # Specify a model
+```
+
+## Key Features
+
+### Intelligent Development
+
+- **Built-in tools** — file I/O, shell execution, code search (Grep / Glob), web fetch, sub-agent delegation, todo tracking, and more
+- **Sub-agents** — ships with 5 (explore / general-purpose / plan / code-reviewer / goal-verifier), supports custom agents
+- **Plan mode** — `--plan` or `/plan` enters read-only exploration; the agent designs a plan, then executes after approval
+- **Durable goal loops** — `/goal` runs execute → verify → repair cycles until passing or hitting a stop condition
+- **Model-directed Git worktrees** — when repository state and verification risk warrant it, the agent can use ordinary Git commands to create and clean up a temporary worktree instead of risking the active checkout
+- **Cross-session messaging** — named local sessions can discover one another and exchange peer-authorized work (macOS / Linux; see [docs](./docs/peer-messaging.en.md))
+- **File attachments** — `@path` or bare absolute paths auto-ingest text / code / PDF / Office docs (docx / xlsx / pptx / odt / ods / odp) / images / audio
+- **Local PDF processing** — selectable text is extracted page by page; scanned or visual pages become images for the active vision model or local OCR for a text model. Large visual PDFs are loaded progressively with `readFile` page ranges. Original PDF bytes are never uploaded
+- **Local audio transcription** — MP3 / WAV / FLAC / OGG Vorbis attachments (up to 25 MiB and 20 minutes) are always transcribed locally via Whisper (whisper.cpp) in an isolated process; only timestamped text reaches the model. Before any model download, the native runtime is probed and a streaming decoder enforces the limit against actual decoded PCM frames. Queue wait and transcription share a hard timeout. First-use model downloads are revision-pinned and SHA-256 verified before being cached under `~/.ygy-code/whisper-models/` (default `tiny`; set `YGY_CODE_WHISPER_MODEL` to pick another, e.g. `base`)
+- **Private attachment fallback** — local image attachments go only to the active vision model; text-only models receive local OCR, without automatically forwarding the attachment to another configured provider
+
+### Context Management
+
+- **Knowledge system** — layered `AGENTS.md` loading (compatible with `CLAUDE.md`), subpackages override root
+- **Auto-memory** — durable facts are extracted after each completed root-agent turn and recalled on demand
+- **Session resumption** — `--continue` resumes the last session, `--resume` opens a picker or jumps by ID / fork name
+- **Session branching** — `/fork [name]` copies completed context into an independent conversation, even while the current request is running; branches still share the same working tree
+- **Context compression** — long conversations auto-compress; loop-guard detects cycles; prompt cache reuses prefixes
+- **3-level permission model** — safe by default, prompts according to tool and command risk; `--trust` skips ordinary tool confirmations, including peer-triggered work
+
+### Extension Ecosystem
+
+- **MCP integration** — stdio + HTTP (with OAuth), `/mcp` management, server tools merge into agent toolset
+- **Plugin system** — bundle skills / sub-agents / commands / MCP / hooks; supports common Claude Code plugin conventions
+- **Skills** — reusable workflow templates as `SKILL.md`, triggered via `/<skill-name>`
+- **Custom slash commands** — drop markdown into `~/.ygy-code/commands/` or project scope, invoke with `/<name>`
+- **Hooks** — 10 lifecycle event callbacks to intercept or rewrite agent behavior via shell commands
+- **Browser automation** — automatic one-shot local UI screenshots (`/browser check-off` disables them); `/browser on` additionally enables an interactive browser sub-agent
+
+### Terminal Experience
+
+- **Streaming output** — results render as they are generated
+- **Theme switching** — `/theme` controls diff colors and syntax-highlight palette
+- **Unified thinking mode** — `/thinking on|off` consolidates provider-specific reasoning parameters
+- **Multiline input** — `Alt+Enter` or trailing `\` inserts a newline
+- **Input history** — `↑`/`↓` on empty prompt recalls previous messages
+- **Mid-turn steering** — keep typing while the agent is working: your message is queued above the spinner and injected at the next tool boundary
+- **Live footer** — the active model and current context usage (e.g. `Kimi K3 · 6.6k / 200k · 3%`) are always visible under the input
+- **Background terminals** — long commands become manageable shell sessions; inspect them with `/ps` and stop them with `/stop [shell-id]` (see the [guide](./docs/shell-sessions.en.md))
+- **Cross-platform** — Windows, macOS, Linux
+
+## CLI Options
+
+```text
+ygy [options] [prompt]
+
+--model, -m <id>      Model to use (e.g. sonnet, deepseek, openai:gpt-5.6-sol)
+--trust, -t           Trust mode: skip ordinary tool confirmations, including peer-triggered work
+--print, -p           Non-interactive mode: print result and exit
+--plan                Start in plan mode (read-only; user approves before edits)
+--name <name>         Name this interactive session and enable local peer messaging
+--continue, -c        Resume the most recent session (no picker)
+--resume, -r [id|name] Resume a session: picker, session ID, or fork name
+--max-turns <n>       Agent loop turn cap per submit (default: unlimited)
+--no-plugins          Disable the plugin system (built-in only; for triage)
+--no-hooks            Skip all hook execution
+--plugin-debug        Mirror plugin/hook debug logs to stderr
+--version, -v         Show version
+--help, -h            Show help
+```
+
+### CLI subcommands
+
+```text
+ygy login [--device-auth]           Sign in with ChatGPT
+ygy login status                    Show the active OpenAI authentication method
+ygy logout                          Sign out from ChatGPT
+ygy plugin <subcommand>            Manage plugins (list / install / uninstall / enable / disable / search / update / info / doctor / marketplace)
+ygy plugin install [--yes] <src>   Install a plugin; --yes skips confirmation
+ygy plugin marketplace <sub>       Manage marketplace subscriptions (list / add / remove / refresh / info)
+```
+
+## Slash Commands
+
+| Command                          | Description                                                          |
+| -------------------------------- | -------------------------------------------------------------------- |
+| `/help`                          | Show available commands                                              |
+| `/login [--device-auth\|status]` | Sign in with ChatGPT or show authentication status                   |
+| `/logout`                        | Sign out from ChatGPT                                                |
+| `/model [model-id\|refresh]`     | Pick a preloaded model or explicitly refresh the ChatGPT catalog     |
+| `/thinking [on\|off]`            | Enable / disable thinking mode                                       |
+| `/theme [name]`                  | Switch UI theme                                                      |
+| `/plan [on\|off]`                | Enable / disable plan mode                                           |
+| `/goal [objective]`              | Start a durable goal loop (see [docs/goal.en.md](./docs/goal.en.md)) |
+| `/usage`                         | Token usage: context split, per-step detail, attribution, cache hits |
+| `/usage-history`                 | List past session usage                                              |
+| `/clear`                         | Clear the current conversation                                       |
+| `/ps`                            | List running background terminals and recent output                  |
+| `/stop [shell-id]`               | Stop one background terminal, or all when no ID is given             |
+| `/clear-peer-context`            | Remove the peer-influenced conversation suffix after confirmation    |
+| `/list-agents`                   | List reachable named ygy-code sessions                                 |
+| `/compact`                       | Manually compress context                                            |
+| `/resume`                        | Pick a past session to resume                                        |
+| `/fork [name]`                   | Branch completed context with an optional name (working tree shared) |
+| `/rewind`                        | Roll back to a previous message (restores files + truncates history) |
+| `/init`                          | Create or update `AGENTS.md` at project root                         |
+| `/review [PR#]`                  | Review a GitHub PR (requires `gh`)                                   |
+| `/memory [subcommand]`           | Inspect, search, explain, or reload global long-term memory          |
+| `/skill <sub>`                   | Manage Skills                                                        |
+| `/mcp <sub>`                     | Manage MCP servers                                                   |
+| `/plugin <sub>`                  | Manage plugins and marketplaces                                      |
+| `/browser <sub>`                 | Configure Browser Use and automatic local visual checks              |
+| `/doctor`                        | Diagnose the runtime environment                                     |
+| `/exit`                          | Save session and exit                                                |
+
+## Detailed Docs
+
+This README is the entry view. Each feature has a focused doc under [`docs/`](./docs/) (Chinese `*.md`, English `*.en.md`):
+
+| Doc                                                            | What it covers               |
+| -------------------------------------------------------------- | ---------------------------- |
+| [`docs/skills.en.md`](./docs/skills.en.md)                     | Reusable workflow templates  |
+| [`docs/goal.en.md`](./docs/goal.en.md)                         | Durable goal loops (`/goal`) |
+| [`docs/peer-messaging.en.md`](./docs/peer-messaging.en.md)     | Cross-session messaging      |
+| [`docs/shell-sessions.en.md`](./docs/shell-sessions.en.md)     | Background shell sessions    |
+| [`docs/sub-agents.en.md`](./docs/sub-agents.en.md)             | Built-in / custom sub-agents |
+| [`docs/mcp.en.md`](./docs/mcp.en.md)                           | MCP server configuration     |
+| [`docs/knowledge.en.md`](./docs/knowledge.en.md)               | Knowledge base & auto-memory |
+| [`docs/plugins.en.md`](./docs/plugins.en.md)                   | Plugin management            |
+| [`docs/marketplace.en.md`](./docs/marketplace.en.md)           | Plugin marketplace           |
+| [`docs/hooks.en.md`](./docs/hooks.en.md)                       | Agent lifecycle hooks        |
+| [`docs/plugin-authoring.en.md`](./docs/plugin-authoring.en.md) | Plugin authoring guide       |
+
+## Troubleshooting
+
+Set `DEBUG_STDOUT=1` to capture a debug log:
+
+```bash
+# bash / zsh
+DEBUG_STDOUT=1 ygy
+
+# fish
+env DEBUG_STDOUT=1 ygy
+
+# PowerShell
+$env:DEBUG_STDOUT=1; ygy
+
+# CMD
+set DEBUG_STDOUT=1 && ygy
+```
+
+Log path: `~/.ygy-code/logs/debug.log` (Windows: `%USERPROFILE%\.ygy-code\logs\debug.log`), 10 MB per file, ~20 MB total with rotation.
+
+## Build From Source
+
+Requires Node.js 22+ and pnpm 10.x.
+
+```bash
+git clone https://github.com/GGGuYu/ygy-code.git
+cd ygy-code
+pnpm install
+pnpm dev
+```
+
+> Source changes require `pnpm build` or `pnpm dev`. For auto-watch, run `pnpm dev` inside `packages/core` (`tsc -b --watch`).
+
+## Companion Book (Chinese)
+
+For a deep dive into the implementation, check out the companion Juejin booklet: [**《从零打造一个 AI Agent CLI》**](https://juejin.cn/book/7639017024882278440?suid=1433418893103645&source=h5) — walks through the agent loop, multi-provider adapter, terminal rendering, permission model, and more using this codebase as reference.
+
+**QQ Group: 455053594**
+
+## Feedback & Contributing
+
+Issues and pull requests are welcome: <https://github.com/GGGuYu/ygy-code>
+
+## License
+
+[MIT](./LICENSE)

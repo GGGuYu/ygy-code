@@ -1,0 +1,385 @@
+// @ygy-code/cli — Custom stdin input hook with bracketed-paste support
+// and a time-window fallback for terminals that don't enable it.
+//
+// Two layered paste-detection strategies:
+//
+//   1. **Bracketed paste mode** (primary, fast path)
+//      We send `\x1b[?2004h` on mount. Terminals that support it wrap every
+//      paste in `\x1b[200~ … \x1b[201~`. The state machine below detects
+//      these markers and emits the payload as a single `onPaste` call
+//      regardless of how Node chunks the stdin bytes.
+//
+//   2. **Debounce fallback** (for Windows Terminal / PowerShell / tmux /
+//      ConEmu / VS Code integrated terminal — any environment where
+//      bracketed paste is NOT honored)
+//      When no paste markers are seen, paste-suspect chunks (>=
+//      PASTE_SIZE_THRESHOLD chars, containing a newline, or arriving
+//      while a burst is in progress) accumulate in a buffer whose
+//      PASTE_DEBOUNCE_MS timer resets on every event, so one paste
+//      flushes as a single atomic chunk once the stream pauses. Single
+//      keystrokes bypass the buffer and dispatch immediately — human
+//      typing never pays the debounce cost. This is the same approach
+//      Claude Code takes in its `usePasteHandler` hook.
+//
+// Special keys (arrows, escape, Ctrl+C, …) always force-flush any
+// pending text before they dispatch, so the pasted content is committed
+// BEFORE the key that acts on it. Enter / tab arriving mid-burst are
+// absorbed into the buffer instead (backspace trims it) — on
+// non-bracketed Windows terminals a bare '\r' is just the paste's next
+// line break, and treating it as Return would submit half the paste.
+import { StringDecoder } from 'node:string_decoder'
+
+import { useEffect, useRef } from 'react'
+
+import { useStdin } from 'ink'
+
+import { type DecodedPromptInput, PromptInputDecoder } from './prompt-input-decoder.js'
+
+const ENABLE_BRACKETED_PASTE = '\x1b[?2004h'
+const DISABLE_BRACKETED_PASTE = '\x1b[?2004l'
+const INCOMPLETE_SEQUENCE_TIMEOUT_MS = 20
+
+// Time window for batching rapid stdin bursts. Human typing never
+// enters this buffer (single-keystroke chunks dispatch immediately),
+// so a generous window costs nothing; pasted text simply appears up to
+// 100 ms later. The window must be wide because Windows terminals
+// without bracketed paste trickle one paste as many small stdin events,
+// and a busy event loop (render + cell-diff after each dispatch) can
+// push inter-chunk gaps well past 30 ms — a narrower window flushed
+// mid-paste and split one paste into scrambled fragments.
+const PASTE_DEBOUNCE_MS = 100
+
+// Any stdin chunk >= this size (or containing a newline) is suspected
+// to be a paste and goes through the debounce buffer so consecutive
+// fragments merge into a single onPaste event. Chunks below this size
+// are treated as normal typing and dispatched IMMEDIATELY — this
+// matches Claude Code's PASTE_THRESHOLD (800) approach. Holding down
+// a key produces single-char stdin events; with the old low threshold
+// (8) every keystroke went through the debounce and felt laggy.
+const PASTE_SIZE_THRESHOLD = 32
+
+type PromptKey =
+  | 'return'
+  | 'newline'
+  | 'backspace'
+  | 'clear'
+  | 'delete'
+  | 'tab'
+  | 'escape'
+  | 'up'
+  | 'down'
+  | 'left'
+  | 'right'
+  | 'home'
+  | 'end'
+  | 'pageup'
+  | 'pagedown'
+
+export interface PromptInputHandlers {
+  /** Normal typed text (may be multi-char if the terminal batched a burst). */
+  onText: (text: string) => void
+  /** Atomic paste — always the full contents of one paste event. */
+  onPaste: (content: string) => void
+  /** Special keys. */
+  onKey: (key: PromptKey) => void
+  /** Called on Ctrl+C — should trigger clean Ink unmount via useApp().exit(). */
+  onInterrupt: () => void
+  /** Turn the listener on/off without unmounting the component. */
+  enabled: boolean
+}
+
+export function usePromptInput({ onText, onPaste, onKey, onInterrupt, enabled }: PromptInputHandlers): void {
+  const { stdin, setRawMode, internal_eventEmitter } = useStdin()
+
+  // Stash handlers in a ref so the effect doesn't re-subscribe on every
+  // render — each render produces a fresh callback closure, but we want a
+  // stable subscription that always calls through to the latest handlers.
+  //
+  // The assignment has to happen inside a useEffect (not during render)
+  // because assigning to ref.current during render is flagged by React's
+  // concurrent-mode rules — it could cause Strict Mode double-invocation
+  // to see mismatched state. An effect with no dep array runs after every
+  // commit, which is exactly the "latest value" semantics we want.
+  const handlersRef = useRef({ onText, onPaste, onKey, onInterrupt })
+  useEffect(() => {
+    handlersRef.current = { onText, onPaste, onKey, onInterrupt }
+  })
+
+  // Debounce buffer + timer for the fallback path.
+  const pendingTextRef = useRef<string>('')
+  const pendingTimerRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Ctrl+C must work even when the input is disabled (e.g. during loading).
+  // We always listen on stdin for \x03 and route it to onInterrupt.
+  // When enabled=false, all other input is ignored.
+  useEffect(() => {
+    if (!enabled) {
+      // Minimal listener: only Ctrl+C, ignore everything else.
+      setRawMode(true)
+      const handleCtrlC = (data: Buffer | string): void => {
+        const chunk = typeof data === 'string' ? data : data.toString('utf8')
+        if (chunk.includes('\x03')) {
+          handlersRef.current.onInterrupt()
+        }
+      }
+      internal_eventEmitter.on('input', handleCtrlC)
+      return () => {
+        internal_eventEmitter.off('input', handleCtrlC)
+        setRawMode(false)
+      }
+    }
+
+    setRawMode(true)
+    process.stdout.write(ENABLE_BRACKETED_PASTE)
+    const useBracketedPaste = true
+    const inputDecoder = new PromptInputDecoder()
+    const utf8Decoder = new StringDecoder('utf8')
+    let sequenceTimer: ReturnType<typeof setTimeout> | null = null
+    let pasteTimer: ReturnType<typeof setTimeout> | null = null
+
+    // ── Flush the debounce buffer ──
+    //
+    // Emits one onPaste (or onText for tiny chunks) with all the text that
+    // accumulated during the last burst. We normalize line endings to `\n`
+    // here because Windows terminals tend to send `\r` or `\r\n` for
+    // pasted newlines; downstream code and the terminal's line-rendering
+    // both want `\n`. A bare `\r` in a terminal print means "carriage
+    // return" and overwrites previous characters, which was producing
+    // the "optimizations Claude Managed Agents is currently in beta"
+    // splicing pattern in echoed pastes.
+    const flushPending = (): void => {
+      if (pendingTimerRef.current) {
+        clearTimeout(pendingTimerRef.current)
+        pendingTimerRef.current = null
+      }
+      const raw = pendingTextRef.current
+      if (!raw) return
+      pendingTextRef.current = ''
+      const text = raw.replace(/\r\n?/g, '\n')
+
+      const looksLikePaste = text.length >= PASTE_SIZE_THRESHOLD || text.includes('\n')
+      if (looksLikePaste) {
+        handlersRef.current.onPaste(text)
+      } else {
+        handlersRef.current.onText(text)
+      }
+    }
+
+    // Debounce from the most recent event: every queued chunk resets the
+    // timer, and the buffer flushes once the stream pauses. There is
+    // intentionally NO max-batch cap here — only paste-suspect chunks
+    // (>= PASTE_SIZE_THRESHOLD chars, containing a newline, or arriving
+    // mid-burst) enter this buffer; held-key repeat produces single-char
+    // events that bypass it (see processNormalInput). A hard cap was
+    // force-flushing mid-paste on Windows, where ConPTY delivers a
+    // multi-KB paste as many stdin events spanning >50 ms, splitting one
+    // paste into scrambled fragments.
+    const armFlushTimer = (): void => {
+      if (pendingTimerRef.current) clearTimeout(pendingTimerRef.current)
+      pendingTimerRef.current = setTimeout(flushPending, PASTE_DEBOUNCE_MS)
+    }
+
+    // Queue text into the debounce buffer and (re)start the flush timer.
+    const queueText = (data: string): void => {
+      pendingTextRef.current += data
+      armFlushTimer()
+    }
+
+    // Dispatch a special key. Always force-flushes pending text first so
+    // that, e.g., Enter commits the previously-buffered input BEFORE acting
+    // on the key.
+    const dispatchKey = (key: PromptKey): void => {
+      flushPending()
+      handlersRef.current.onKey(key)
+    }
+
+    // Parse a chunk of non-paste input. Returns immediately for recognized
+    // special keys; otherwise buffers as text.
+    const processNormalInput = (data: string): void => {
+      if (data.length === 0) return
+
+      // Once paste-suspect text sits in the debounce buffer, a paste
+      // burst is in progress: everything that follows until the stream
+      // pauses belongs to the same burst. Windows terminals without
+      // bracketed paste (ConPTY) trickle one paste as many small stdin
+      // events — short trailing lines, bare '\r' bytes, tab characters —
+      // that individually fall below PASTE_SIZE_THRESHOLD. Letting them
+      // take the immediate paths below force-flushed the buffer
+      // mid-paste, splitting one paste into scrambled fragments (a bare
+      // '\r' would even submit early via dispatchKey('return')).
+      const burstInProgress = pendingTextRef.current.length > 0
+
+      if (data === '\r' || data === '\n') {
+        if (burstInProgress) return queueText(data)
+        return dispatchKey('return')
+      }
+      if (data === '\x7f' || data === '\b') {
+        // If the debounce buffer has pending text, absorb the backspace by
+        // trimming the buffer instead of flushing + dispatching.
+        if (pendingTextRef.current.length > 0) {
+          pendingTextRef.current = pendingTextRef.current.slice(0, -1)
+          return
+        }
+        // Dispatch immediately so holding backspace feels responsive
+        // (previously queueBackspace sat in the debounce buffer and
+        // the timer kept resetting on every repeat event, freezing
+        // the delete visually until the key was released).
+        dispatchKey('backspace')
+        return
+      }
+      if (data === '\t') {
+        if (burstInProgress) return queueText(data)
+        return dispatchKey('tab')
+      }
+
+      // Shell-native input clearing shortcuts. Ctrl+U is the familiar
+      // zsh/readline binding on macOS and Linux; PowerShell's default
+      // Windows edit mode uses Ctrl+Home. Treat both as one atomic clear
+      // so multiline drafts and compact paste references are removed too.
+      if (data === '\x15') return dispatchKey('clear')
+      if (data === '\x1b[1;5H' || data === '\x1b[1;5~') return dispatchKey('clear')
+
+      // Alt/Option+Enter → insert a literal newline. Most terminals that
+      // distinguish Alt-modified keys send the prefix-ESC form: `\x1b\r`
+      // (Alt+Enter on Windows Terminal / Linux xterm / iTerm2 with
+      // "Esc+" Option mapping) or `\x1b\n` on a few. The CSI forms below
+      // come from modifyOtherKeys / kitty keyboard protocol — not
+      // enabled by default anywhere we target, but if a power user has
+      // turned them on we honor them too.
+      //   xterm modifyOtherKeys: ESC [27;3;13~ (Alt+Enter), ESC [27;5;13~ (Ctrl+Enter)
+      //   kitty CSI-u:           ESC [13;3u   (Alt+Enter), ESC [13;5u   (Ctrl+Enter)
+      // Plain Ctrl+Enter is indistinguishable from Enter on stock
+      // terminals; the kitty/modifyOtherKeys CSI forms are the only way
+      // it can reach us, so they're treated identically to Alt+Enter.
+      if (data === '\x1b\r' || data === '\x1b\n') return dispatchKey('newline')
+      if (data === '\x1b[27;3;13~' || data === '\x1b[27;5;13~') return dispatchKey('newline')
+      if (data === '\x1b[13;3u' || data === '\x1b[13;5u') return dispatchKey('newline')
+
+      if (data === '\x1b' || data === '\x1b\x1b') return dispatchKey('escape')
+
+      // Ctrl+C — flush and call the interrupt handler (which triggers Ink's
+      // clean unmount via useApp().exit()). We do NOT send SIGINT because on
+      // Windows, signal-exit re-raises it after running callbacks, causing
+      // the process to exit with code 1 before our gracefulShutdown runs.
+      if (data === '\x03') {
+        flushPending()
+        handlersRef.current.onInterrupt()
+        return
+      }
+
+      // ANSI arrow keys and navigation (exact matches)
+      if (data === '\x1b[A') return dispatchKey('up')
+      if (data === '\x1b[B') return dispatchKey('down')
+      if (data === '\x1b[C') return dispatchKey('right')
+      if (data === '\x1b[D') return dispatchKey('left')
+      if (data === '\x1b[H' || data === '\x1b[1~') return dispatchKey('home')
+      if (data === '\x1b[F' || data === '\x1b[4~') return dispatchKey('end')
+      if (data === '\x1b[3~') return dispatchKey('delete')
+      if (data === '\x1b[5~') return dispatchKey('pageup')
+      if (data === '\x1b[6~') return dispatchKey('pagedown')
+      // (Mode-cycle key bindings — Shift+Tab `\x1b[Z` and the Alt+M
+      // `\x1b m` Windows fallback — were removed; mode switching is
+      // driven exclusively by slash commands now. See ChatInput hint
+      // text and the /plan handler in App.tsx.)
+
+      // Unknown escape sequences — drop so they don't show up as literal
+      // "\x1b[…" text in the input.
+      if (data.startsWith('\x1b')) return
+
+      // Printable text. Two paths:
+      //  - Paste-suspect chunks (large, multi-line, or arriving while a
+      //    burst is in progress) go through the debounce buffer so a
+      //    paste split across several stdin events merges into one
+      //    onPaste call.
+      //  - Small single-keystroke chunks with no burst in progress
+      //    dispatch IMMEDIATELY. Holding down a key fires stdin events
+      //    at ~30 Hz and debouncing each one made the input feel
+      //    frozen / stutter. Claude Code does the same (their
+      //    usePasteHandler bypasses the paste buffer for
+      //    input.length < PASTE_THRESHOLD).
+      if (burstInProgress || data.length >= PASTE_SIZE_THRESHOLD || data.includes('\n')) {
+        queueText(data)
+      } else {
+        handlersRef.current.onText(data)
+      }
+    }
+
+    const dispatchDecoded = (events: DecodedPromptInput[]): void => {
+      for (const event of events) {
+        if (event.type === 'paste') {
+          flushPending()
+          handlersRef.current.onPaste(event.value)
+        } else {
+          processNormalInput(event.value)
+        }
+      }
+    }
+
+    const clearSequenceTimer = (): void => {
+      if (sequenceTimer) clearTimeout(sequenceTimer)
+      sequenceTimer = null
+    }
+
+    const clearPasteTimer = (): void => {
+      if (pasteTimer) clearTimeout(pasteTimer)
+      pasteTimer = null
+    }
+
+    const armDecoderTimers = (): void => {
+      clearSequenceTimer()
+      if (inputDecoder.inPaste()) {
+        clearPasteTimer()
+        pasteTimer = setTimeout(() => {
+          pasteTimer = null
+          dispatchDecoded(inputDecoder.flush())
+        }, 1000)
+        return
+      }
+      clearPasteTimer()
+      if (inputDecoder.hasPending()) {
+        sequenceTimer = setTimeout(() => {
+          sequenceTimer = null
+          dispatchDecoded(inputDecoder.flush())
+        }, INCOMPLETE_SEQUENCE_TIMEOUT_MS)
+      }
+    }
+
+    // Node chunks are arbitrary byte groups, not key events. Decode them
+    // incrementally so combined keys and split CSI/paste markers both work.
+    const handleData = (data: Buffer | string): void => {
+      const chunk = typeof data === 'string' ? data : utf8Decoder.write(data)
+      if (!chunk) return
+
+      // Unmarked paste fallback: an interior newline is likely clipboard
+      // content. A trailing Return is excluded so `abc\r` types then submits.
+      if (
+        !inputDecoder.inPaste() &&
+        !chunk.includes('\x1b') &&
+        (chunk.length >= PASTE_SIZE_THRESHOLD || /[\r\n][\s\S]+/.test(chunk))
+      ) {
+        queueText(chunk)
+        return
+      }
+
+      clearSequenceTimer()
+      dispatchDecoded(inputDecoder.push(chunk))
+      armDecoderTimers()
+    }
+
+    // Ink owns stdin's `readable` listener and drains the stream itself.
+    // Listening for `data` in parallel races that drain and can lose input;
+    // its input emitter is the single post-read delivery path used by useInput.
+    internal_eventEmitter.on('input', handleData)
+    return () => {
+      flushPending()
+      clearSequenceTimer()
+      clearPasteTimer()
+      inputDecoder.reset()
+      internal_eventEmitter.off('input', handleData)
+      if (useBracketedPaste) {
+        process.stdout.write(DISABLE_BRACKETED_PASTE)
+      }
+      setRawMode(false)
+    }
+  }, [enabled, stdin, setRawMode, internal_eventEmitter])
+}

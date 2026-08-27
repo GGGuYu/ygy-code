@@ -1,0 +1,111 @@
+import { countContentRows } from '../src/ui/chat-input/text-helpers.js'
+import { resetScrollbackSpacing, writeMessageToStdout } from '../src/ui/render/stdout-writer.js'
+import { GLYPH_PROMPT_ARROW } from '../src/ui/render/terminal-glyphs.js'
+import { visualWidth } from '../src/ui/render/text-width.js'
+
+const { originalNoColor } = vi.hoisted(() => {
+  const originalNoColor = process.env.NO_COLOR
+  delete process.env.NO_COLOR
+  return { originalNoColor }
+})
+
+// Regression: an over-wide echo line used to be left to the terminal's
+// auto-wrap — the wrapped remainder row kept the bg behind its text but got
+// no trailing padding, tearing the card's right edge. The echo now hard-wraps
+// at cols-3 and carries the bg to the right edge with an in-span `\x1b[K`
+// (BCE erase) instead of full-width space padding, so terminal-narrow reflow
+// has no old-width padding cells to split into phantom blank rows.
+
+const COLS = 80
+// eslint-disable-next-line no-control-regex
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b\][^\x07]*\x07/g, '')
+
+function echo(content: string): string {
+  let out = ''
+  writeMessageToStdout(
+    (chunk) => {
+      out += chunk
+    },
+    { id: 'u', role: 'user', content, timestamp: 0 },
+  )
+  return out
+}
+
+function physicalRows(out: string): string[] {
+  const rows = stripAnsi(out).replace(/\r\n/g, '\n').split('\n')
+  // Drop the trailing empty segment produced by the final newline.
+  if (rows.length > 0 && rows[rows.length - 1] === '') rows.pop()
+  return rows
+}
+
+describe('user echo card wrapping', () => {
+  let originalColumns: number | undefined
+
+  afterAll(() => {
+    if (originalNoColor === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = originalNoColor
+  })
+
+  beforeEach(() => {
+    resetScrollbackSpacing()
+    originalColumns = process.stdout.columns
+    Object.defineProperty(process.stdout, 'columns', { value: COLS, configurable: true })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, 'columns', { value: originalColumns, configurable: true })
+  })
+
+  it('hard-wraps a long CJK line and never pads rows to full width', () => {
+    const out = echo(
+      '我通过 /ps 命令来查看后台 shell 的时候，发现执行的时候只是打印了一下当前后台 shell 的执行情况，codex cli 也是这样的吗 还是说一直实时显示状态的 先确认我们产品和 codex cli 的实现是 /ps 只打印当前状态还是实时显示状态的  d:\\res\\codex',
+    )
+    const rows = physicalRows(out)
+    // Padding rows contain one printable anchor space, so non-whitespace
+    // rows are exactly the wrapped text chunks of the long line.
+    expect(rows.filter((r) => r.trim().length > 0).length).toBeGreaterThanOrEqual(3)
+    for (const row of rows) {
+      // No printable cell may land in the last column (delayed-wrap guard) —
+      // and rows carry no full-width space padding — the in-span \x1b[K
+      // (stripped here) carries the bg to the right edge.
+      expect(visualWidth(row)).toBeLessThanOrEqual(COLS - 1)
+    }
+    // Row accounting used by the frame geometry must match reality.
+    expect(countContentRows(out, COLS)).toBe(rows.length)
+    // Bg is applied (dark card #3c3836 → 48;2;60;56;54) and the erase-to-EOL
+    // rides inside the bg span so the row's tail picks up the card color.
+    expect(out).toContain('\x1b[48;2;60;56;54m')
+    expect(out).toContain('\x1b[K\x1b[49m')
+  })
+
+  it('does not pad continuation rows of an explicit multi-line message', () => {
+    const out = echo('第一行文本\nsecond line with ascii')
+    const rows = physicalRows(out)
+    expect(rows.filter((r) => r.trim().length > 0).length).toBe(2)
+    for (const row of rows) {
+      expect(visualWidth(row)).toBeLessThanOrEqual(COLS - 1)
+    }
+    expect(countContentRows(out, COLS)).toBe(rows.length)
+  })
+
+  it('aligns wrapped continuation text under the first row text (3-cell prefix)', () => {
+    const out = echo('x'.repeat(COLS)) // 80 ascii chars → wraps once at budget 76
+    const rows = physicalRows(out).filter((r) => r.trim().length > 0)
+    expect(rows.length).toBe(2)
+    expect(rows[0]!.startsWith(` ${GLYPH_PROMPT_ARROW} `)).toBe(true)
+    expect(rows[1]!.startsWith('   x')).toBe(true)
+  })
+
+  it('anchors vertical padding rows without padding them to the old terminal width', () => {
+    const out = echo('hello')
+    const rawRows = out.replace(/\r\n/g, '\n').split('\n')
+    const anchoredPadRow = '\x1b[48;2;60;56;54m \x1b[K\x1b[49m'
+    expect(rawRows[1]).toBe(anchoredPadRow)
+    expect(rawRows[3]).toBe(anchoredPadRow)
+
+    const rows = physicalRows(out)
+    expect(rows).toEqual(['', ' ', ` ${GLYPH_PROMPT_ARROW} hello`, ' ', ''])
+    expect(visualWidth(rows[1]!)).toBe(1)
+    expect(visualWidth(rows[3]!)).toBe(1)
+  })
+})

@@ -1,0 +1,17 @@
+import type { TerminateAllResult, TerminationBudget, TerminationReason } from '@ygy-code/core'
+
+export interface CliCleanupController {
+  quiesce?(): Promise<void> | void
+  terminateShells(reason: TerminationReason, budget?: TerminationBudget): Promise<TerminateAllResult | null>
+  drain(): Promise<void>
+}
+
+let registeredController: CliCleanupController | null = null
+
+export function registerCleanupController(controller: CliCleanupController | null): void {
+  registeredController = controller
+}
+
+export function getCleanupController(): CliCleanupController | null {
+  return registeredController
+}

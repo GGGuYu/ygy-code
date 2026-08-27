@@ -1,0 +1,527 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+import { streamText, tool } from 'ai'
+
+import { z } from 'zod'
+
+import { classifyApiError } from '../src/agent/api-errors.js'
+import {
+  getOpenAIAuthSnapshot,
+  initializeOpenAIAuthContext,
+  refreshOpenAIAuthSnapshot,
+  resetOpenAIAuthContextForTesting,
+} from '../src/auth/openai-chatgpt/auth-resolver.js'
+import { writeOpenAIChatGPTCredentials } from '../src/auth/openai-chatgpt/credential-store.js'
+import { getProviderOptions, saveUserConfig } from '../src/config/index.js'
+import {
+  OPENAI_SESSION_ID_HEADER,
+  XAI_PROMPT_CACHE_KEY_HEADER,
+  applyCacheControl,
+} from '../src/providers/cache-control.js'
+import { createModelRegistry, kimiCodingModelId } from '../src/providers/registry.js'
+
+function sseResponse(events: unknown[]): Response {
+  return new Response(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`, {
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
+describe('Kimi endpoint model ids', () => {
+  let testHome: string
+
+  beforeEach(() => {
+    testHome = path.join(os.tmpdir(), `ygy-code-provider-registry-${Math.random().toString(36).slice(2)}`)
+    process.env.YGY_CODE_HOME = testHome
+    process.env.MOONSHOT_API_KEY = 'test-key'
+    process.env.XAI_API_KEY = 'test-key'
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    resetOpenAIAuthContextForTesting()
+    delete process.env.YGY_CODE_HOME
+    delete process.env.ALIBABA_API_KEY
+    delete process.env.ANTHROPIC_API_KEY
+    delete process.env.MOONSHOT_API_KEY
+    delete process.env.OPENAI_API_KEY
+    delete process.env.XAI_API_KEY
+    fs.rmSync(testHome, { recursive: true, force: true })
+  })
+
+  it('maps platform model ids to the Coding Plan wire ids', () => {
+    expect(kimiCodingModelId('kimi-k3')).toBe('k3')
+    expect(kimiCodingModelId('kimi-k2.7-code')).toBe('kimi-for-coding')
+    expect(kimiCodingModelId('kimi-k2.7-code-highspeed')).toBe('kimi-for-coding-highspeed')
+    expect(kimiCodingModelId('kimi-k2.6')).toBe('kimi-for-coding')
+    expect(kimiCodingModelId('future-model')).toBe('future-model')
+  })
+
+  it('uses Coding Plan wire ids only on the Coding Plan endpoint', () => {
+    saveUserConfig({ baseUrls: { moonshotai: 'https://api.kimi.com/coding/v1' } })
+    let registry = createModelRegistry()
+    expect(registry.languageModel('moonshotai:kimi-k3').modelId).toBe('k3')
+    expect(registry.languageModel('moonshotai:kimi-k2.7-code').modelId).toBe('kimi-for-coding')
+    expect(registry.languageModel('moonshotai:kimi-k2.6').modelId).toBe('kimi-for-coding')
+
+    saveUserConfig({ baseUrls: { moonshotai: 'https://api.moonshot.ai/v1' } })
+    registry = createModelRegistry()
+    expect(registry.languageModel('moonshotai:kimi-k3').modelId).toBe('kimi-k3')
+    expect(registry.languageModel('moonshotai:kimi-k2.7-code').modelId).toBe('kimi-k2.7-code')
+  })
+
+  it('moves xAI session affinity into the Responses prompt_cache_key body field', async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(JSON.stringify({ error: { message: 'test stop' } }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    const cache = applyCacheControl({
+      instructions: 'stable instructions',
+      messages: [{ role: 'user', content: 'hello' }],
+      modelId: 'xai:grok-4.5',
+      sessionId: 'session-1',
+    })
+    const result = streamText({
+      model: createModelRegistry().languageModel('xai:grok-4.5'),
+      instructions: cache.instructions,
+      messages: cache.messages,
+      headers: cache.headers,
+      abortSignal: controller.signal,
+      onError: () => undefined,
+    })
+    for await (const _chunk of result.textStream) {
+      // The mock returns a deliberate error after the outbound request is captured.
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('https://api.x.ai/v1/responses')
+    expect(JSON.parse(String(init?.body))).toMatchObject({ prompt_cache_key: 'session-1' })
+    const headers = new Headers(init?.headers)
+    expect(headers.get(XAI_PROMPT_CACHE_KEY_HEADER)).toBeNull()
+    expect(headers.get('x-grok-conv-id')).toBeNull()
+    expect(init?.signal).toBe(controller.signal)
+  })
+
+  it('serializes Anthropic cache breakpoints without putting a system role in messages', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key'
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://api.anthropic.com')
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      Response.json({ error: { message: 'test stop' } }, { status: 400 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const tools = {
+      lookup: tool({
+        description: 'look something up',
+        inputSchema: z.object({ query: z.string() }),
+      }),
+    }
+    const cache = applyCacheControl({
+      instructions: 'stable instructions',
+      messages: [{ role: 'user', content: 'hello' }],
+      tools,
+      modelId: 'anthropic:claude-opus-4-8',
+      sessionId: 'session-1',
+    })
+    const errors: unknown[] = []
+    const result = streamText({
+      model: createModelRegistry().languageModel('anthropic:claude-opus-4-8'),
+      instructions: cache.instructions,
+      messages: cache.messages,
+      tools: cache.tools,
+      onError: ({ error }) => {
+        errors.push(error)
+      },
+    })
+    for await (const _chunk of result.textStream) {
+      // The mock returns a deliberate error after the outbound request is captured.
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(errors).toHaveLength(1)
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('https://api.anthropic.com/v1/messages')
+    const body = JSON.parse(String(init?.body)) as Record<string, any>
+    expect(body.system).toEqual([{ type: 'text', text: 'stable instructions', cache_control: { type: 'ephemeral' } }])
+    expect(body.messages[0]).toMatchObject({ role: 'user' })
+    expect(body.messages.some((message: { role?: string }) => message.role === 'system')).toBe(false)
+    expect(body.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' })
+    expect(body.tools[0].cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  it('serializes Alibaba message cache breakpoints and leaves tools unmarked', async () => {
+    process.env.ALIBABA_API_KEY = 'test-key'
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      Response.json({ error: { message: 'test stop' } }, { status: 400 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const tools = {
+      lookup: tool({
+        description: 'look something up',
+        inputSchema: z.object({ query: z.string() }),
+      }),
+    }
+    const cache = applyCacheControl({
+      instructions: 'stable instructions',
+      messages: [{ role: 'user', content: 'hello' }],
+      tools,
+      modelId: 'alibaba:qwen3-coder-plus',
+      sessionId: 'session-1',
+    })
+    const errors: unknown[] = []
+    const result = streamText({
+      model: createModelRegistry().languageModel('alibaba:qwen3-coder-plus'),
+      instructions: cache.instructions,
+      messages: cache.messages,
+      tools: cache.tools,
+      onError: ({ error }) => {
+        errors.push(error)
+      },
+    })
+    for await (const _chunk of result.textStream) {
+      // The mock returns a deliberate error after the outbound request is captured.
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(errors).toHaveLength(1)
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions')
+    const body = JSON.parse(String(init?.body)) as Record<string, any>
+    expect(body.messages[0]).toEqual({
+      role: 'system',
+      content: [{ type: 'text', text: 'stable instructions', cache_control: { type: 'ephemeral' } }],
+    })
+    expect(body.messages[1].content[0].cache_control).toEqual({ type: 'ephemeral' })
+    expect(JSON.stringify(body.tools)).not.toContain('cache_control')
+  })
+
+  it('registers one OpenAI provider with ChatGPT auth and keeps OPENAI_API_KEY out of the request', async () => {
+    process.env.OPENAI_API_KEY = 'platform-key-must-never-leak'
+    await writeOpenAIChatGPTCredentials({
+      version: 1,
+      accessToken: 'oauth-access',
+      refreshToken: 'oauth-refresh',
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      accountId: 'account-1',
+    })
+    resetOpenAIAuthContextForTesting()
+    expect(getProviderOptions().openai).toBeUndefined()
+
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(JSON.stringify({ error: { message: 'test stop' } }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const model = createModelRegistry().languageModel('openai:gpt-5.6-sol')
+    const cache = applyCacheControl({
+      instructions: 'stable instructions',
+      messages: [{ role: 'user', content: 'hello' }],
+      modelId: 'openai:gpt-5.6-sol',
+      sessionId: 'session-1',
+    })
+    const result = streamText({
+      model,
+      instructions: cache.instructions,
+      messages: cache.messages,
+      providerOptions: cache.providerOptions as Parameters<typeof streamText>[0]['providerOptions'],
+      headers: cache.headers,
+      onError: () => undefined,
+    })
+    for await (const _chunk of result.textStream) {
+      // The mock returns a deliberate error after the outbound request is captured.
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('https://chatgpt.com/backend-api/codex/responses')
+    const headers = new Headers(init?.headers)
+    expect(headers.get('authorization')).toBe('Bearer oauth-access')
+    expect(headers.get('session-id')).toBe('session-1')
+    expect(headers.get(OPENAI_SESSION_ID_HEADER)).toBeNull()
+    const body = JSON.parse(String(init?.body)) as Record<string, any>
+    expect(body.prompt_cache_key).toMatch(/^ygy-agent-v1:/)
+    expect(body.prompt_cache_key).not.toBe('session-1')
+    expect(body.prompt_cache_options).toBeUndefined()
+    expect(body.instructions).toBe('stable instructions')
+    expect(JSON.stringify(body)).not.toContain('prompt_cache_breakpoint')
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('platform-key-must-never-leak')
+  })
+
+  it('pins Platform API auth to OpenAI despite OPENAI_BASE_URL and strips the internal session header', async () => {
+    vi.stubEnv('OPENAI_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+    process.env.OPENAI_API_KEY = 'platform-key'
+    initializeOpenAIAuthContext()
+    expect(getOpenAIAuthSnapshot().context.mode).toBe('api-key')
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      Response.json({ error: { message: 'test stop' } }, { status: 400 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const cache = applyCacheControl({
+      instructions: 'stable instructions',
+      messages: [{ role: 'user', content: 'hello' }],
+      modelId: 'openai:gpt-5.6-sol',
+      sessionId: 'session-1',
+    })
+    const model = createModelRegistry().languageModel('openai:gpt-5.6-sol')
+    expect(model.provider).toContain('openai')
+    const result = streamText({
+      model,
+      instructions: cache.instructions,
+      messages: cache.messages,
+      providerOptions: cache.providerOptions as Parameters<typeof streamText>[0]['providerOptions'],
+      headers: cache.headers,
+      onError: () => undefined,
+    })
+    for await (const _chunk of result.textStream) {
+      // The mock returns a deliberate error after the outbound request is captured.
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe('https://api.openai.com/v1/responses')
+    const headers = new Headers(init?.headers)
+    expect(headers.get(OPENAI_SESSION_ID_HEADER)).toBeNull()
+    expect(headers.get('session-id')).toBeNull()
+    const body = JSON.parse(String(init?.body)) as Record<string, any>
+    expect(body.prompt_cache_key).toMatch(/^ygy-agent-v1:/)
+    expect(body.prompt_cache_options).toEqual({ mode: 'implicit', ttl: '30m' })
+    expect(body.input[0].content[0].prompt_cache_breakpoint).toEqual({ mode: 'explicit' })
+  })
+
+  it('fails closed before a stale API-key provider can send after an external ChatGPT login', async () => {
+    process.env.OPENAI_API_KEY = 'platform-key-must-never-send'
+    initializeOpenAIAuthContext()
+    const providerSnapshot = getOpenAIAuthSnapshot()
+    const staleModel = createModelRegistry().languageModel('openai:gpt-5.6-sol')
+    await writeOpenAIChatGPTCredentials({
+      version: 1,
+      accessToken: 'oauth-access',
+      refreshToken: 'oauth-refresh',
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      accountId: 'account-1',
+      authRevision: 'external-login',
+    })
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    const errors: unknown[] = []
+    const result = streamText({
+      model: staleModel,
+      messages: [{ role: 'user', content: 'must not use the platform key' }],
+      onError: ({ error }) => {
+        errors.push(error)
+      },
+    })
+    for await (const _chunk of result.textStream) {
+      // The guarded provider returns a local 401 before the global fetch is reached.
+    }
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(errors).toHaveLength(1)
+    expect(String(errors[0])).toContain('authentication changed in another process')
+
+    const observedAfterGuard = await refreshOpenAIAuthSnapshot()
+    expect(observedAfterGuard.revision).not.toBe(providerSnapshot.revision)
+    expect(observedAfterGuard.context.mode).toBe('chatgpt')
+
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: 'test stop' } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    const rebound = streamText({
+      model: createModelRegistry().languageModel('openai:gpt-5.6-sol'),
+      messages: [{ role: 'user', content: 'retry with the active authentication' }],
+      onError: () => undefined,
+    })
+    for await (const _chunk of rebound.textStream) {
+      // The rebound provider reaches the ChatGPT endpoint and stops at the mock response.
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://chatgpt.com/backend-api/codex/responses')
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('authorization')).toBe('Bearer oauth-access')
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('platform-key-must-never-send')
+  })
+
+  it('does not let the AI SDK retry a ChatGPT subscription usage limit', async () => {
+    await writeOpenAIChatGPTCredentials({
+      version: 1,
+      accessToken: 'oauth-access',
+      refreshToken: 'oauth-refresh',
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      accountId: 'account-1',
+    })
+    resetOpenAIAuthContextForTesting()
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      sseResponse([
+        {
+          type: 'response.failed',
+          sequence_number: 0,
+          response: {
+            error: { message: 'Your subscription limit has been reached', code: 429, type: 'usage_limit_reached' },
+          },
+        },
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const errors: unknown[] = []
+    const result = streamText({
+      model: createModelRegistry().languageModel('openai:gpt-5.6-sol'),
+      messages: [{ role: 'user', content: 'hello' }],
+      onError: ({ error }) => {
+        errors.push(error)
+      },
+    })
+    for await (const _chunk of result.textStream) {
+      // A subscription quota error has no stream chunks.
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(errors).toHaveLength(1)
+    expect(classifyApiError(errors[0]).message).toContain('ChatGPT subscription usage limit reached')
+  })
+
+  it('round-trips encrypted ChatGPT reasoning across a tool-call boundary', async () => {
+    process.env.OPENAI_API_KEY = 'platform-key-must-never-leak'
+    await writeOpenAIChatGPTCredentials({
+      version: 1,
+      accessToken: 'oauth-access',
+      refreshToken: 'oauth-refresh',
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      accountId: 'account-1',
+    })
+    resetOpenAIAuthContextForTesting()
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        sseResponse([
+          {
+            type: 'response.created',
+            response: { id: 'response-1', created_at: 1, model: 'gpt-5.6-sol' },
+          },
+          {
+            type: 'response.output_item.added',
+            output_index: 0,
+            item: { type: 'reasoning', id: 'reasoning-1', encrypted_content: 'encrypted-reasoning' },
+          },
+          { type: 'response.reasoning_summary_part.added', item_id: 'reasoning-1', summary_index: 0 },
+          {
+            type: 'response.reasoning_summary_text.delta',
+            item_id: 'reasoning-1',
+            summary_index: 0,
+            delta: 'reasoned',
+          },
+          { type: 'response.reasoning_summary_part.done', item_id: 'reasoning-1', summary_index: 0 },
+          {
+            type: 'response.output_item.done',
+            output_index: 0,
+            item: { type: 'reasoning', id: 'reasoning-1', encrypted_content: 'encrypted-reasoning' },
+          },
+          {
+            type: 'response.output_item.added',
+            output_index: 1,
+            item: {
+              type: 'function_call',
+              id: 'function-1',
+              call_id: 'call-1',
+              name: 'testTool',
+              arguments: '',
+            },
+          },
+          {
+            type: 'response.function_call_arguments.delta',
+            item_id: 'function-1',
+            output_index: 1,
+            delta: '{}',
+          },
+          {
+            type: 'response.output_item.done',
+            output_index: 1,
+            item: {
+              type: 'function_call',
+              id: 'function-1',
+              call_id: 'call-1',
+              name: 'testTool',
+              arguments: '{}',
+              status: 'completed',
+            },
+          },
+          {
+            type: 'response.completed',
+            response: {
+              usage: {
+                input_tokens: 10,
+                output_tokens: 5,
+                input_tokens_details: { cached_tokens: 0 },
+                output_tokens_details: { reasoning_tokens: 2 },
+              },
+            },
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'test stop' } }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    const model = createModelRegistry().languageModel('openai:gpt-5.6-sol')
+    const tools = { testTool: tool({ inputSchema: z.object({}) }) }
+    const first = streamText({
+      model,
+      messages: [{ role: 'user', content: 'use the tool' }],
+      tools,
+      reasoning: 'high',
+      providerOptions: { openai: { store: false } },
+      onError: () => undefined,
+    })
+    for await (const _chunk of first.fullStream) {
+      // Consume the complete first response so the SDK materializes response.messages.
+    }
+    const firstMessages = (await first.response).messages
+    const second = streamText({
+      model,
+      messages: [
+        { role: 'user', content: 'use the tool' },
+        ...firstMessages,
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'call-1',
+              toolName: 'testTool',
+              output: { type: 'text', value: 'done' },
+            },
+          ],
+        },
+      ],
+      tools,
+      reasoning: 'high',
+      providerOptions: { openai: { store: false } },
+      onError: () => undefined,
+    })
+    for await (const _chunk of second.fullStream) {
+      // The second mock intentionally stops after the request has been captured.
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as { input?: unknown[] }
+    expect(JSON.stringify(secondBody.input)).toContain('encrypted-reasoning')
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('platform-key-must-never-leak')
+  })
+})

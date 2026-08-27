@@ -1,0 +1,14 @@
+{
+  "protocolVersion": 2,
+  "sourceSha256": "0c599ff1763573faa9266ba7a012c8f7f87cf75d723d7bc8e5403da33e2906be",
+  "artifacts": {
+    "x64": {
+      "file": "x64/ygy-shell-supervisor.exe",
+      "sha256": "e4a99d21759551712f4ea7e60bd11b5595a9b2442569f074ebcb671f05fa2cb2"
+    },
+    "arm64": {
+      "file": "arm64/ygy-shell-supervisor.exe",
+      "sha256": "463eb57ccd64ffb438dff3f0a93548e403b6122e05431939f72f91f6427c2e3f"
+    }
+  }
+}

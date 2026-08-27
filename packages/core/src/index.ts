@@ -1,0 +1,497 @@
+// @ygy-code/core — Public API exports
+
+// Types
+export type {
+  PermissionDecision,
+  PermissionLevel,
+  PermissionMode,
+  TokenUsage,
+  TodoItem,
+  TodoStatus,
+  DisplayMessage,
+  DisplayToolCall,
+  AgentCallbacks,
+  AgentOptions,
+  StreamRetryEvent,
+  SessionSummary,
+  ModelMessage,
+  LanguageModel,
+  ExecutionAuthority,
+  AuthorityApproval,
+  AuthorityApprovalPreview,
+  ToolCapability,
+  PublicPeer,
+  QueuedAgentInput,
+  TrackedModelMessage,
+  ContextSecurityState,
+  MessageProvenance,
+  PeerOriginSummary,
+} from './types/index.js'
+
+export {
+  MODEL_ALIASES,
+  PROVIDER_BASE_URLS,
+  PROVIDER_DETECTION_ORDER,
+  PROVIDER_KEY_URLS,
+  PROVIDER_MODELS,
+  PROVIDER_REASONING_TIERS,
+  PROVIDERS,
+} from './providers/catalog.js'
+export type { ProviderModel } from './providers/catalog.js'
+
+// Config
+export {
+  DEFAULT_MEMORY_CONFIG,
+  DEFAULT_PEER_MESSAGING_CONFIG,
+  DEFAULT_STREAM_CONFIG,
+  resolveMemoryConfig,
+  resolvePeerMessagingConfig,
+  resolveStreamConfig,
+  resolveModelId,
+  getAvailableProviders,
+  getEnvVarName,
+  loadUserConfig,
+  saveUserConfig,
+} from './config/index.js'
+
+// OpenAI authentication
+export {
+  getOpenAIAuthContext,
+  getOpenAIAuthSnapshot,
+  getOpenAIAuthStatus,
+  initializeOpenAIAuthContext,
+  refreshOpenAIAuthContextIfChanged,
+  refreshOpenAIAuthSnapshot,
+  resetOpenAIAuthContextForTesting,
+} from './auth/openai-chatgpt/auth-resolver.js'
+export type { OpenAIAuthSnapshot } from './auth/openai-chatgpt/auth-resolver.js'
+export {
+  clearOpenAIChatGPTCredentials,
+  hasOpenAIChatGPTCredentials,
+  readOpenAIChatGPTCredentials,
+  withOpenAIChatGPTCredentialLock,
+  writeOpenAIChatGPTCredentials,
+} from './auth/openai-chatgpt/credential-store.js'
+export {
+  loginOpenAIChatGPTWithBrowser,
+  loginOpenAIChatGPTWithDevice,
+  revokeOpenAIChatGPTCredentials,
+} from './auth/openai-chatgpt/oauth.js'
+export type { OpenAIAuthContext, OpenAIAuthStatus, OpenAIChatGPTCredentials } from './auth/openai-chatgpt/types.js'
+export type {
+  MemoryConfig,
+  MemoryReasoningMode,
+  MemoryRecallConfig,
+  PeerMessagingConfig,
+  StreamConfig,
+  UserConfig,
+} from './config/index.js'
+
+// Provider Registry
+export { createModelRegistry, setZhipuReasoningEffort } from './providers/registry.js'
+export {
+  getOpenAIChatGPTModelCatalogState,
+  getProviderModels,
+  refreshOpenAIChatGPTModels,
+} from './providers/openai-chatgpt-models.js'
+export type { OpenAIChatGPTModelCatalogState } from './providers/openai-chatgpt-models.js'
+
+// Agent
+export {
+  agentLoop,
+  compressMessages,
+  compressMessagesWithUsage,
+  drainQueuedInputs,
+  formatQueuedAgentInput,
+  saveSession,
+} from './agent/loop.js'
+export { compressTrackedMessagesWithUsage } from './agent/compression.js'
+export type { AgentLoopResult, CompressionResult } from './agent/loop.js'
+export { createLoopState } from './agent/loop-state.js'
+export {
+  deriveContextSecurity,
+  effectiveExecutionAuthority,
+  mergePeerOriginSummaries,
+  summarizePeerOrigins,
+} from './agent/provenance.js'
+export { KEEP_RECENT, KEEP_RECENT_TOKENS, MIN_KEEP_MESSAGES } from './agent/compression.js'
+export type { LoopState } from './agent/loop.js'
+export type { StepStats } from './agent/loop-state.js'
+export {
+  consumeExpectedCacheMissReasons,
+  createProviderTurnUsage,
+  estimateCacheMiss,
+  markExpectedCacheMiss,
+  scanCacheMisses,
+} from './agent/cache-stats.js'
+export type { CacheMissEstimate, CacheMissReason, CacheMissSummary, ProviderTurnUsage } from './agent/cache-stats.js'
+export {
+  accumulateUsage,
+  attributedModelId,
+  cloneUsageBreakdown,
+  createUsageBreakdown,
+  normalizeLanguageModelUsage,
+} from './agent/usage.js'
+export type { UsageAttribution, UsageBreakdown, UsageDelta, UsageSource } from './agent/usage.js'
+export { computeEditDiff } from './agent/diff.js'
+export type { EditDiffHunk, EditDiffPayload } from './agent/diff.js'
+export { generateTaskSlug, makePlanFilePath } from './agent/plan-storage.js'
+export {
+  COMPRESSION_TRIGGER_RATIO,
+  MIN_CONTEXT_WINDOW_OVERRIDE,
+  estimateMessageTokenCount,
+  estimateTextTokenCount,
+  estimateTokenCount,
+  getCompressionThreshold,
+  getContextWindow,
+  getContextWindowOverride,
+  setContextWindowOverride,
+} from './agent/context-window.js'
+export {
+  buildContextBreakdownInput,
+  calibrateContextBreakdown,
+  estimateContextBreakdown,
+} from './agent/context-usage.js'
+export type {
+  CalibratedContextCategory,
+  ContextBreakdown,
+  ContextBreakdownInput,
+  ContextDetailEstimate,
+  ContextCategoryEstimate,
+  ContextCategoryKey,
+} from './agent/context-usage.js'
+export {
+  buildSystemPrompt,
+  buildSubAgentSystemPrompt,
+  formatDeferredCapabilities,
+  formatMcpCapabilities,
+  formatSkillCapabilities,
+} from './agent/system-prompt.js'
+export { classifyApiError } from './agent/api-errors.js'
+export { buildUserContent, extractFileReferences, ingestFile, classifyFile } from './agent/file-ingest.js'
+export type { FileKind, FileReference, IngestedPart } from './agent/file-ingest.js'
+export { formatTranscription, isAudioFile, isWhisperAvailable, transcribeAudio } from './agent/audio-transcribe.js'
+export type { TranscribeAudioResult, TranscribeSegment } from './agent/audio-transcribe.js'
+export { captionImage, pickVisionProvider, resetVisionModelProviders } from './agent/vision-fallback.js'
+export type { VisionProvider, VisionUsageEvent } from './agent/vision-fallback.js'
+export {
+  admitGoalInput,
+  buildVerifierFailurePrompt,
+  cancelGoal,
+  clearPendingTransition,
+  clearGoal,
+  createGoal,
+  createGoalRunCoordinator,
+  isGoalTerminal,
+  pauseGoal,
+  pendingGoalInputs,
+  promoteNextGoalInput,
+  remainingTokenBudget,
+  recordVerificationFailure,
+  resetVerificationFailures,
+  resumeGoal,
+  runGoalLoop,
+  runVerifierLadder,
+  updateGoalStatus,
+} from './agent/goal/index.js'
+export type {
+  GoalAttempt,
+  GoalInput,
+  GoalInputKind,
+  GoalRunSummary,
+  GoalState,
+  GoalStatus,
+  GoalVerifier,
+  GoalVerificationResult,
+} from './agent/goal/index.js'
+
+// Provider capabilities
+export { capabilitiesOf, modelSupportsVision, providerOf } from './providers/capabilities.js'
+export type { ProviderCapabilities } from './providers/capabilities.js'
+export { getReasoningTierOptions, supportsReasoningTier } from './providers/thinking.js'
+
+// Tools
+export { toolRegistry, truncateToolResult } from './tools/index.js'
+export { TOOL_SEARCH_TOOL_NAME } from './tools/tool-search.js'
+export { resolveWebSearchProvider, setWebSearchModelProvider } from './tools/web-search.js'
+export { getShellProvider } from './tools/shell-provider.js'
+export type { ShellProvider, ShellType } from './tools/shell-provider.js'
+export { forceTerminateManagedShellsSync } from './tools/shell-session/shutdown-target-registry.js'
+export type {
+  EmergencyTerminationResult,
+  FinalObservationLease,
+  ProcessTerminationResult,
+  ShellExecutionResult,
+  ShellFailure,
+  ShellFailureCode,
+  ShellObservation,
+  ShellSessionController,
+  ShellSessionEvent,
+  ShellSessionEventSource,
+  ShellSessionListener,
+  ShellSessionSummary,
+  ShellTerminationResult,
+  TerminateAllResult,
+  TerminationBudget,
+  TerminationReason,
+} from './tools/shell-session/types.js'
+
+// Permissions
+export { checkPermission, getPermissionLevel } from './permissions/index.js'
+export { addSessionAllowRule, clearSessionRules, buildAllowRule } from './permissions/index.js'
+export {
+  extractCommandPrefix,
+  extractCompoundPrefixes,
+  extractCompoundRules,
+  suggestRuleLabel,
+} from './permissions/index.js'
+export { loadPersistedRules, persistRule } from './permissions/index.js'
+export type { AllowRule } from './permissions/session-store.js'
+export {
+  MAX_EGRESS_APPROVAL_BYTES,
+  canonicalizeToolInput,
+  classifyToolCall,
+  evaluateToolAuthority,
+  verifyAuthorityApproval,
+} from './permissions/authority.js'
+
+// Cross-session lifecycle primitives. Stage 0 deliberately exports no transport or service.
+export { createPeerInbox } from './peers/inbox.js'
+export { DEFAULT_PEER_INBOX_LIMITS } from './peers/inbox-types.js'
+export type * from './peers/inbox-types.js'
+export * from './peers/index.js'
+
+// Utils
+export { USER_YGY_DIR, YGY_DIR, debugLog, errorMessage, setPluginDebugMirror, userYgyDir } from './utils.js'
+export { LruCache } from './utils/lru-cache.js'
+export { knownMediaTypeFor, mediaTypeFor } from './utils/media-type.js'
+export { extractText } from './utils/message-helpers.js'
+export { ensureProjectStorageDir } from './project-storage.js'
+
+// Knowledge
+export { buildKnowledgeContext } from './knowledge/loader.js'
+export { MemoryService } from './knowledge/memory/service.js'
+export { MemoryIndex, normalizeMemoryText, tokenizeMemoryText } from './knowledge/memory/search-index.js'
+export { MemoryStore, formatMemoryTopic, parseMemoryTopic, renderCoreProfile } from './knowledge/memory/store.js'
+export { buildRecallQuery, MemoryRetriever } from './knowledge/memory/retriever.js'
+export type {
+  EvidenceKind,
+  LateRecallSignals,
+  MemoryChange,
+  MemoryEvidence,
+  MemoryJob,
+  MemoryOperation,
+  MemoryRecallAttachment,
+  MemoryRecallTombstone,
+  MemoryRecallTrace,
+  MemorySearchArgs,
+  MemorySearchContext,
+  MemorySearchResult,
+  MemoryStatus,
+  MemoryStatusReport,
+  MemoryTopic,
+  MemoryType,
+  MemoryWriteNotice,
+  RecallQuery,
+  TopicMetadataPatch,
+  TurnMemoryProjection,
+} from './knowledge/memory/types.js'
+export { generateSessionSummary } from './agent/session-summary.js'
+
+// Sub-agents
+export { createSubAgentRegistry, createBuiltInRegistry, SubAgentRegistry } from './agent/sub-agents/index.js'
+export type { SubAgentDefinition, SubAgentEvent, SubAgentTrace } from './agent/sub-agents/index.js'
+// Managed browser — private MCP lifecycle (gracefulShutdown closes the browser).
+export { shutdownBrowserMcp } from './agent/browser/registry.js'
+
+// File-based slash commands (plugin-contributed `commands/*.md`).
+export { CommandRegistry, createCommandRegistry, loadPluginCommands, expandCommandBody } from './commands/index.js'
+export type { CommandDefinition, LoadCommandsOptions } from './commands/index.js'
+
+// Hooks — agent lifecycle event subsystem driven by plugin contributions.
+export {
+  HookBus,
+  emptyHookBus,
+  aggregatePreToolUse,
+  aggregatePostToolUse,
+  aggregateUserPromptSubmit,
+} from './hooks/bus.js'
+export type { EmitOptions as HookEmitOptions, PreToolEffect, PostToolEffect, UserPromptEffect } from './hooks/bus.js'
+export { HookRegistry, buildHookRegistry, emptyHookRegistry } from './hooks/registry.js'
+export { executeHook } from './hooks/executor.js'
+export type { ExecuteHookOptions } from './hooks/executor.js'
+export { hookConfigSchema, parseHookConfig, HookConfigParseError } from './hooks/config-schema.js'
+export { buildVariableContext, expandVariables } from './hooks/variables.js'
+export type { VariableContext } from './hooks/variables.js'
+export type {
+  DecisionEvent,
+  HookConfig,
+  HookConfigEntry,
+  HookDecision,
+  HookEvent,
+  HookEventName,
+  RegisteredHook,
+  SessionContext as HookSessionContext,
+} from './hooks/types.js'
+
+// Plugins — discovery, install, marketplace, registry.
+export { loadAllPlugins, resolveContributions } from './plugins/loader.js'
+export type {
+  LoadOptions as PluginLoadOptions,
+  LoadResult as PluginLoadResult,
+  ResolvedContributions,
+} from './plugins/loader.js'
+export { PluginRegistry, emptyPluginRegistry } from './plugins/registry.js'
+export type { PluginReloadSummary } from './plugins/registry.js'
+export {
+  buildPluginIntegration,
+  debugLogIntegrationDiagnostics,
+  getPluginMcpServersFromDisk,
+} from './plugins/integration.js'
+export type { PluginIntegrationOutput } from './plugins/integration.js'
+export { refreshPluginContributions } from './plugins/refresh.js'
+export type { PluginRefreshSummary, PluginRefreshTargets } from './plugins/refresh.js'
+export {
+  installPlugin,
+  uninstallPlugin,
+  listInstalledPlugins,
+  findInstalledPlugin,
+  InstallError,
+} from './plugins/installer.js'
+export type { InstallRequest, InstallResult, UninstallResult } from './plugins/installer.js'
+export { buildConsentPreview, probePluginRoot } from './plugins/consent.js'
+export type { ConsentPreview, BuildPreviewInput, RootProbe } from './plugins/consent.js'
+export {
+  getPluginUserConfig,
+  setPluginUserConfig,
+  clearPluginUserConfig,
+  getPluginUserConfigEnv,
+} from './plugins/user-config.js'
+export type { UserConfigValue, PluginUserConfig } from './plugins/user-config.js'
+export {
+  parseMarketplace,
+  readKnownMarketplaces,
+  addKnownMarketplace,
+  removeKnownMarketplace,
+  ensureDefaultMarketplaces,
+  fetchMarketplace,
+  readAllCachedMarketplaces,
+  lookupPlugin,
+  resolveCloneUrl,
+  RESERVED_MARKETPLACE_NAMES,
+  MarketplaceParseError,
+} from './plugins/marketplace.js'
+export {
+  EnableState,
+  setPluginEnabled,
+  clearPluginEntry,
+  settingsPathForScope as pluginSettingsPathForScope,
+} from './plugins/enable-state.js'
+export type { ResolvedEnableState } from './plugins/enable-state.js'
+export type {
+  LoadedPlugin,
+  PluginManifest,
+  PluginAuthor,
+  UserConfigItem,
+  PluginSource,
+  PluginScope,
+  ManifestFormat,
+  PluginLoadError,
+  Marketplace,
+  MarketplaceEntry,
+  KnownMarketplace,
+  KnownMarketplaces,
+  InstalledPluginRecord,
+  InstalledPlugins,
+} from './plugins/types.js'
+export { discoverManifest, parseManifest, ManifestParseError } from './plugins/manifest.js'
+
+// Skills
+export {
+  SkillRegistry,
+  createSkillRegistry,
+  reloadSkillRegistry,
+  formatSkillActivationBody,
+  wrapActivatedSkill,
+} from './skills/registry.js'
+export type { SkillDefinition, SkillEntry, SkillReloadSummary } from './skills/registry.js'
+export { getScopedDisabledSkills, setSkillDisabled, skillSettingsPath } from './skills/settings.js'
+export type { SkillSettingsScope } from './skills/settings.js'
+
+// Session store (per-session jsonl transcript — used by /resume,
+// /usage history, and the CLI startup --resume / --continue flags).
+export {
+  appendCheckpoint,
+  appendGoalInput,
+  appendGoalState,
+  appendGoalVerification,
+  appendHeader,
+  appendInterrupted,
+  appendUsage,
+  clearPeerContext,
+  appendMemoryRecall,
+  appendMemoryRecallDelete,
+  captureSessionForkSnapshot,
+  flushPendingMessages,
+  forkSession,
+  getSessionFilePath,
+  hydrateLoopState,
+  listSessions,
+  loadSession,
+  markBoundaryAndReflush,
+  pickLatestSession,
+} from './agent/session-store.js'
+export type {
+  ForkedSession,
+  LoadedSession,
+  SessionForkOrigin,
+  SessionForkSnapshot,
+  SessionListEntry,
+} from './agent/session-store.js'
+
+// Rewind snapshots — file-history backing for /rewind.
+export { createCheckpoint, restoreCheckpoint, getDiffStatsForCheckpoint } from './agent/snapshot.js'
+export type { CheckpointEntry, DiffStats } from './agent/snapshot.js'
+
+// MCP — Model Context Protocol client support.
+export { McpRegistry, emptyRegistry } from './mcp/registry.js'
+export type {
+  RegisteredServer,
+  RestartSummary as McpRestartSummary,
+  AuthHooks as McpAuthHooks,
+  ConnectResult as McpConnectResult,
+  OAuthProviderFactory,
+} from './mcp/registry.js'
+export { loadMcpServers, loadMcpFromDisk, loadMcpConfigsFromDisk, loadMergedConfigsFromDisk } from './mcp/loader.js'
+export type { LoadOptions as McpLoadOptions, LoadResult as McpLoadResult } from './mcp/loader.js'
+export { McpPermissionStore, classifyDecision } from './mcp/permissions.js'
+export type { McpPermissionDecision } from './mcp/permissions.js'
+export { isProjectTrusted, trustProject, promptForTrust, buildServerPreview } from './mcp/trust.js'
+export type { TrustChoice } from './mcp/trust.js'
+export { McpTokenStorage, getTokenStorage, setTokenStorageForTesting } from './mcp/oauth/token-storage.js'
+export type { StoredServerAuth } from './mcp/oauth/token-storage.js'
+export { McpOAuthProvider, createOAuthProviderFactory } from './mcp/oauth/provider.js'
+export { startCallbackServer } from './mcp/oauth/callback-server.js'
+export type { McpServerConfig, McpServerStatus, McpToolEntry, McpResourceEntry, McpCallResult } from './mcp/types.js'
+export { isStdioConfig, isHttpConfig } from './mcp/types.js'
+export { buildCallableName, MCP_MAX_NAME_LEN } from './mcp/name-mangling.js'
+export { expandEnvDeep, expandEnvString, EnvExpansionError } from './mcp/expand-env.js'
+export { parseServersBlock, parseServerConfig, mcpServersSchema } from './mcp/config-schema.js'
+export { parseAdd, parseAddJson, parseRemove, tokenize } from './mcp/arg-parser.js'
+export type {
+  AddCommand,
+  AddJsonCommand,
+  RemoveCommand,
+  ParsedCommand,
+  ParseResult,
+  ConfigScope,
+} from './mcp/arg-parser.js'
+export {
+  detectScope,
+  getConfigPath as getMcpConfigPath,
+  readServerConfig,
+  removeServerFromConfig,
+  serverExists,
+  writeServerToConfig,
+} from './mcp/config-writer.js'
+export type { DetectScopeResult } from './mcp/config-writer.js'
