@@ -56,7 +56,7 @@ packages/
 
 **Cross-session messaging** (`core/src/peers/`, `cli/src/peer-lifecycle.ts`): `--name` enables local discovery and messaging for interactive root sessions. Peer input taints the derived context and routes tool calls through the authority evaluator; do not bypass that path. Transport is local Unix sockets on macOS/Linux in this release; Windows must fail closed as unsupported until it has an audited native transport.
 
-**Knowledge** (`core/src/knowledge/`): four layers merged into system prompt — user AGENTS.md, user memory Core profile (`~/.ygy-code/memory/MEMORY.md`), project AGENTS.md chain (root→leaf, leaf wins), AGENTS.local.md.
+**Knowledge** (`core/src/knowledge/`): layered context merged into system prompt — user AGENTS.md, then the memory slot, then project AGENTS.md chain (root→leaf, leaf wins), AGENTS.local.md. The memory slot is either wiki memory mode (config `wiki.enabled` + `wiki.path`; injects wiki usage rules incl. PageIndex, disables Memory v2) or the Memory v2 core profile (`~/.ygy-code/memory/MEMORY.md`) by default.
 
 **Provider config**: `packages/core/src/providers/catalog.ts:PROVIDERS` is the single provider metadata table (envKey, defaultModel, /model picker entries, key URL, base URLs, reasoning tiers); `PROVIDER_*` derived views and the test env-var list all come from it. API keys read only from env vars, plus escape hatch `OPENAI_COMPATIBLE_API_KEY` + `OPENAI_COMPATIBLE_BASE_URL`. OpenAI also supports ChatGPT subscription OAuth through `auth/openai-chatgpt/`; stored ChatGPT credentials take exclusive precedence over `OPENAI_API_KEY` until `ygy logout`, and authentication failures must never fall back to the key. Adding a provider = one catalog entry + a constructor branch in `providers/registry.ts`.
 

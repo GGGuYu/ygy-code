@@ -44,9 +44,11 @@ export {
   DEFAULT_MEMORY_CONFIG,
   DEFAULT_PEER_MESSAGING_CONFIG,
   DEFAULT_STREAM_CONFIG,
+  DEFAULT_WIKI_CONFIG,
   resolveMemoryConfig,
   resolvePeerMessagingConfig,
   resolveStreamConfig,
+  resolveWikiConfig,
   resolveModelId,
   getAvailableProviders,
   getEnvVarName,
@@ -85,6 +87,7 @@ export type {
   PeerMessagingConfig,
   StreamConfig,
   UserConfig,
+  WikiConfig,
 } from './config/index.js'
 
 // Provider Registry
@@ -270,6 +273,8 @@ export { ensureProjectStorageDir } from './project-storage.js'
 
 // Knowledge
 export { buildKnowledgeContext } from './knowledge/loader.js'
+export { buildWikiMemoryContext } from './knowledge/wiki-memory.js'
+export type { WikiMemory } from './knowledge/wiki-memory.js'
 export { MemoryService } from './knowledge/memory/service.js'
 export { MemoryIndex, normalizeMemoryText, tokenizeMemoryText } from './knowledge/memory/search-index.js'
 export { MemoryStore, formatMemoryTopic, parseMemoryTopic, renderCoreProfile } from './knowledge/memory/store.js'

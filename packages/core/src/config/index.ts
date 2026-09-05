@@ -132,6 +132,38 @@ const BROWSER_CHANNELS = new Set<NonNullable<BrowserConfig['browser']>>([
 ])
 const BROWSER_VIEWPORT_RE = /^(\d{3,4})\s*[,x]\s*(\d{3,4})$/i
 
+/**
+ * External Markdown wiki memory. When enabled and `path` points at a wiki
+ * root (a directory containing `index.md`), ygy-code treats that wiki as the
+ * agent's long-term memory instead of Memory v2's user-scope auto memory:
+ * wiki usage rules are injected into the knowledge context, AGENTS.md layers
+ * are still loaded as usual, and memory writes follow the wiki's user-gated
+ * conventions rather than an automatic post-turn extractor.
+ */
+export interface WikiConfig {
+  /** Turn on the wiki memory mode (disables Memory v2 at runtime). */
+  enabled?: boolean
+  /** Absolute path to the wiki root. A symlink is allowed; the loader
+   *  resolves the real path for grep/script instructions. */
+  path?: string
+}
+
+export const DEFAULT_WIKI_CONFIG: Readonly<{ enabled: boolean; path: string }> = {
+  enabled: false,
+  path: '',
+}
+
+/** Sanitize the user `wiki` config block. Invalid values fall back to
+ *  disabled defaults so a bad hand-edit never disables normal operation. */
+export function resolveWikiConfig(value: unknown): { enabled: boolean; path: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ...DEFAULT_WIKI_CONFIG }
+  const raw = value as Record<string, unknown>
+  return {
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : DEFAULT_WIKI_CONFIG.enabled,
+    path: typeof raw.path === 'string' && raw.path.trim() ? raw.path.trim() : DEFAULT_WIKI_CONFIG.path,
+  }
+}
+
 /** Sanitize hand-edited browser settings before constructing an MCP command.
  *  Invalid optional fields fall back to managed defaults; a command override
  *  is kept only when its argv is a plain string array. */
@@ -383,6 +415,8 @@ export interface UserConfig {
   stream?: Partial<StreamConfig>
   memory?: Partial<Omit<MemoryConfig, 'recall'>> & { recall?: Partial<MemoryRecallConfig> }
   peerMessaging?: Partial<PeerMessagingConfig>
+  /** External wiki memory mode. See {@link WikiConfig}. */
+  wiki?: WikiConfig
 }
 
 /** Path to the user config file. Exposed so other modules that want to
@@ -402,6 +436,7 @@ export function loadUserConfig(): UserConfig {
       const config = parsed as UserConfig
       if ('browser' in config) config.browser = resolveBrowserConfig(config.browser)
       if ('peerMessaging' in config) config.peerMessaging = resolvePeerMessagingConfig(config.peerMessaging)
+      if ('wiki' in config) config.wiki = resolveWikiConfig(config.wiki)
       return config
     }
   } catch {

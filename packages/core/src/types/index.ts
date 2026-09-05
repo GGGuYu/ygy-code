@@ -8,6 +8,7 @@ import type { CommandRegistry } from '../commands/registry.js'
 import type { HookBus } from '../hooks/bus.js'
 import type { MemoryService } from '../knowledge/memory/service.js'
 import type { MemoryWriteNotice } from '../knowledge/memory/types.js'
+import type { WikiMemory } from '../knowledge/wiki-memory.js'
 import type { McpPermissionStore } from '../mcp/permissions.js'
 import type { McpRegistry } from '../mcp/registry.js'
 import type { PeerService } from '../peers/service.js'
@@ -484,8 +485,14 @@ export interface AgentOptions {
    *  cross-session messaging was explicitly enabled at startup. */
   peerService?: PeerService
 
-  /** Global Memory v2 service. Present only on the root agent. */
+  /** Global Memory v2 service. Present only on the root agent. When
+   *  `wikiMemory` is set, this should stay undefined — the wiki replaces
+   *  the auto-memory backend. */
   memoryService?: MemoryService
+  /** External Markdown wiki memory (config `wiki`). When set, wiki usage
+   *  rules are injected in place of the Memory v2 core profile and no
+   *  auto-memory worker is started. */
+  wikiMemory?: WikiMemory
 }
 
 export interface SessionSummary {

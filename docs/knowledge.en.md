@@ -10,7 +10,9 @@ Knowledge is merged in this order at startup. Later project files have higher pr
 
 ```text
 1. ~/.ygy-code/AGENTS.md                  # hand-written user preferences
-2. ~/.ygy-code/memory/MEMORY.md           # derived global-memory Core profile
+2. Memory slot (one of)
+   a. Wiki memory mode (config `wiki`)    # external wiki + PageIndex rules as long-term memory
+   b. ~/.ygy-code/memory/MEMORY.md        # default: derived Memory v2 Core profile
 3. <repo>/AGENTS.md chain               # cwd to git root, root → leaf
 4. <cwd>/AGENTS.local.md                # private preferences for the launch directory
 ```
@@ -32,6 +34,30 @@ Use this for shared architecture, commands, and constraints. In a monorepo, ygy-
 ### `<cwd>/AGENTS.local.md`
 
 Use this for private, machine-specific preferences in the directory where `ygy` is launched. It is not searched up the repository chain.
+
+## Wiki memory mode (external Markdown wiki as long-term memory)
+
+A config switch that replaces Memory v2 with an external wiki as the agent's long-term memory. Set it in `~/.ygy-code/config.json`:
+
+```json
+{
+  "wiki": {
+    "enabled": true,
+    "path": "/Volumes/PSSD/guyu/project/wiki"
+  }
+}
+```
+
+- `path` points at the wiki root (must contain `index.md`). Symlinks are allowed; the real path is resolved and injected into the prompt so grep/scripts use the real path.
+- When enabled, **Memory v2 does not start**: no auto-extraction worker, no `memorySearch` tool, no `MEMORY.md` writes; `/memory` reports unavailable.
+- **AGENTS.md injection is unchanged**: user-level, project chain, and `AGENTS.local.md` still load normally.
+- A `### Wiki 记忆` section is injected into every session's system prompt, containing:
+  - wiki usage rules (read `index.md` first → grep → read relevant sections on demand; the index is navigation, not a store)
+  - PageIndex pre-filter rules (read `.pageindex/<path>.tree.json` before long articles, then read only needed line ranges; no tree = read the article directly)
+  - writing/maintenance standards entry point (`tools/wiki-standards.md`, when present)
+  - the guyu-feishu-llm-wiki skill query conventions (when the skill is installed locally)
+- Writes are user-gated: the agent writes only when the user explicitly asks ("remember", "write this to the wiki", "update the doc"), never auto-writes or auto-deletes; deletions need explicit confirmation.
+- To disable, remove the block or set `enabled` to `false`; default Memory v2 behavior is restored.
 
 ## Memory v2
 
@@ -169,10 +195,10 @@ Users may back up or remove those files themselves if they no longer need them. 
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `/memory` is empty                     | Normal for a fresh store; complete a turn containing a durable fact, then inspect `/memory status`        |
 | Pending jobs do not drain              | Check provider keys and the worker and Last run fields in `/memory status`                                |
-| Failed count increases                 | Inspect the status error category; enable `DEBUG_STDOUT=1` and read `~/.ygy-code/logs/debug.log`            |
+| Failed count increases                 | Inspect the status error category; enable `DEBUG_STDOUT=1` and read `~/.ygy-code/logs/debug.log`          |
 | Manual edits do not appear             | Run `/memory reload` or restart; there is no watcher                                                      |
 | A topic disappears                     | Check the Invalid list for broken frontmatter, fact IDs, or related links                                 |
 | Recall is inaccurate                   | Use `/memory explain` to inspect exact/BM25F/selector routing, then try a specific `/memory search` query |
-| Need to verify cross-repository recall | Use the same `YGY_CODE_HOME` in two repositories, save a fact in one, and ask for it in the other           |
+| Need to verify cross-repository recall | Use the same `YGY_CODE_HOME` in two repositories, save a fact in one, and ask for it in the other         |
 
 Use `AGENTS.md` for explicit rules that must always apply. Use Memory v2 for user-profile and long-term facts maintained from complete conversations and recalled on demand.

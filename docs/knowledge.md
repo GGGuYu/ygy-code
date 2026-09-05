@@ -10,7 +10,9 @@ ygy-code 同时使用人工维护的项目知识和全局长期记忆。项目�
 
 ```text
 1. ~/.ygy-code/AGENTS.md                  # 用户级人工偏好
-2. ~/.ygy-code/memory/MEMORY.md           # 全局记忆的派生 Core profile
+2. 记忆槽（二选一）
+   a. Wiki 记忆模式（config `wiki`）      # 注入 wiki 使用规则 + PageIndex，外部 wiki 作长期记忆
+   b. ~/.ygy-code/memory/MEMORY.md        # 默认：Memory v2 的派生 Core profile
 3. <repo>/AGENTS.md chain               # cwd 到 git root，root → leaf
 4. <cwd>/AGENTS.local.md                # ygy 启动目录下的私人偏好
 ```
@@ -32,6 +34,30 @@ Windows 上的 `~/.ygy-code` 对应 `%USERPROFILE%\.ygy-code`。设置 `YGY_CODE
 ### `<cwd>/AGENTS.local.md`
 
 保存 `ygy` 启动目录下只对当前用户有效、不应提交的偏好。该文件不会沿仓库目录链向上查找。
+
+## Wiki 记忆模式（外部 Markdown wiki 当长期记忆）
+
+把长期记忆从 Memory v2 换成“外部 wiki”的开关，配置在 `~/.ygy-code/config.json`：
+
+```json
+{
+  "wiki": {
+    "enabled": true,
+    "path": "/Volumes/PSSD/guyu/project/wiki"
+  }
+}
+```
+
+- `path` 指向 wiki 根目录（含 `index.md`）。允许符号链接；启动时会解析真实路径并注入到提示词里，提示 grep/脚本用真实路径。
+- 开启后 **Memory v2 不启动**：没有自动提取 worker、`memorySearch` 工具和 `MEMORY.md` 写入；`/memory` 会显示不可用。
+- **AGENTS.md 注入链路不变**：用户级 / 项目级 chain / `AGENTS.local.md` 照常加载。
+- 系统提示词每会话常驻注入 `### Wiki 记忆` 段，内容包含：
+  - wiki 使用提示词（先整读 `index.md` → grep → 按需读正文；index 是导航不是仓库）
+  - PageIndex 预筛规则（候选正文先读 `.pageindex/<path>.tree.json` 再按行号读原文；无树直接读原文）
+  - 写作与维护规范入口（`tools/wiki-standards.md`，若存在）
+  - guyu-feishu-llm-wiki skill 的查询口径（本机 skill 存在时按其 Query/维护约定执行）
+- 写入是用户把关动作：agent 只在用户明确要求“记住/记一下/写进 wiki/更新某档案”时写，不自动写、不自动删；删除需用户确认。
+- 关闭方式：删除该配置块或把 `enabled` 设为 `false`，即回到默认 Memory v2。
 
 ## Memory v2
 
@@ -169,10 +195,10 @@ Memory v2 不迁移旧系统：
 | -------------------- | ----------------------------------------------------------------------------------------- |
 | `/memory` 为空       | 全新存储正常；完成一次包含长期事实的完整问答，再看 `/memory status`                       |
 | pending 长时间不减少 | 检查 provider key 和 `/memory status` 的 worker、Last run                                 |
-| failed 增加          | 查看 status 的 error category；启用 `DEBUG_STDOUT=1` 后检查 `~/.ygy-code/logs/debug.log`    |
+| failed 增加          | 查看 status 的 error category；启用 `DEBUG_STDOUT=1` 后检查 `~/.ygy-code/logs/debug.log`  |
 | 人工编辑不生效       | 执行 `/memory reload` 或重启；系统没有 watch                                              |
 | topic 消失           | 查看 `/memory status` 的 Invalid 列表，修复 frontmatter、fact ID 或 related link          |
 | 召回不准确           | 用 `/memory explain` 查看 exact/BM25F/selector 路径，再用具体 query 执行 `/memory search` |
-| 想验证跨仓库         | 在两个仓库中使用同一 `YGY_CODE_HOME`，保存后从另一个仓库提问                                |
+| 想验证跨仓库         | 在两个仓库中使用同一 `YGY_CODE_HOME`，保存后从另一个仓库提问                              |
 
 `AGENTS.md` 适合必须始终执行的明确规则；Memory v2 适合 Agent 从完整问答中持续维护、按需召回的用户画像和长期事实。

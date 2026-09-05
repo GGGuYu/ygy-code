@@ -4,7 +4,9 @@
 // section; sections concatenated in the order below):
 //
 //   1. User AGENTS.md (~/.ygy-code/) — fallback to CLAUDE.md when absent
-//   2. User memory Core profile (~/.ygy-code/memory/MEMORY.md)
+//   2. Memory slot — one of:
+//      a. Wiki memory context (when `wiki.enabled` + `wiki.path` is configured)
+//      b. User memory Core profile (~/.ygy-code/memory/MEMORY.md) otherwise
 //   3. Project AGENTS.md chain — fallback to CLAUDE.md per directory
 //   4. AGENTS.local.md at project root                 — personal preferences, gitignored
 //
@@ -22,6 +24,8 @@ import path from 'node:path'
 
 import { fileExists, readFileSafe, userYgyDir } from '../utils.js'
 import type { MemoryService } from './memory/service.js'
+import { buildWikiMemoryContext } from './wiki-memory.js'
+import type { WikiMemory } from './wiki-memory.js'
 
 /** Filenames recognised at each directory, tried in order. The first one
  *  found wins for that directory; the rest are skipped. AGENTS.md is our
@@ -78,6 +82,7 @@ async function collectProjectKnowledgeChain(
 export async function buildKnowledgeContext(options?: {
   sessionContext?: string
   memoryService?: MemoryService
+  wikiMemory?: WikiMemory
   cwd?: string
 }): Promise<string> {
   const sections: string[] = []
@@ -105,9 +110,19 @@ export async function buildKnowledgeContext(options?: {
     )
   }
 
-  const userMemoryContent = options?.memoryService?.getCoreProfile().trim()
-  if (userMemoryContent) {
-    pushUniqueSection('### User Auto Memory', userMemoryContent)
+  // The memory slot is exclusive: when wiki memory mode is configured the
+  // wiki usage rules replace the Memory v2 core profile. AGENTS.md layers
+  // above/below are untouched.
+  if (options?.wikiMemory) {
+    const wikiMemoryContent = await buildWikiMemoryContext(options.wikiMemory)
+    if (wikiMemoryContent) {
+      pushUniqueSection('### Wiki 记忆（外部长期记忆）', wikiMemoryContent)
+    }
+  } else {
+    const userMemoryContent = options?.memoryService?.getCoreProfile().trim()
+    if (userMemoryContent) {
+      pushUniqueSection('### User Auto Memory', userMemoryContent)
+    }
   }
 
   const cwd = options?.cwd ?? process.cwd()

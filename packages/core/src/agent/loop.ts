@@ -948,7 +948,11 @@ export async function agentLoop(
       await memoryService.recall(initialRecallQuery, state).catch(logMemoryFailure('memory.recall-error'))
     }
     if (fullKnowledgeContext === null) {
-      fullKnowledgeContext = await buildKnowledgeContext({ memoryService: options.memoryService, cwd: process.cwd() })
+      fullKnowledgeContext = await buildKnowledgeContext({
+        memoryService: options.memoryService,
+        wikiMemory: options.wikiMemory,
+        cwd: process.cwd(),
+      })
       state.knowledgeContext = fullKnowledgeContext
     }
 

@@ -33,18 +33,12 @@ import {
   resolveModelId,
   resolveStreamConfig,
   resolveWebSearchProvider,
+  resolveWikiConfig,
   setContextWindowOverride,
   setPluginDebugMirror,
   shutdownBrowserMcp,
 } from '@ygy-code/core'
-import type {
-  AgentOptions,
-  HookBus,
-  LoadedSession,
-  McpRegistry,
-  PeerService,
-  TerminationReason,
-} from '@ygy-code/core'
+import type { AgentOptions, HookBus, LoadedSession, McpRegistry, PeerService, TerminationReason } from '@ygy-code/core'
 
 import { startApp } from './app.js'
 import { runAuthCli, shouldEnterProductAfterAuth } from './auth-cli.js'
@@ -336,15 +330,29 @@ async function main() {
   // Create registries and get model
   const providerRegistry = createModelRegistry()
   const model = providerRegistry.languageModel(modelId as `${string}:${string}`)
-  const memoryService = new MemoryService({
-    // Authentication can change inside the running product via /login or
-    // /logout, so resolve against a fresh provider registry when the memory
-    // worker starts a later background job.
-    resolveModel: (id) => createModelRegistry().languageModel(id as `${string}:${string}`),
-  })
-  memoryServiceForShutdown = memoryService
-  memoryService.setActiveModelId(modelId)
-  await memoryService.initialize(process.cwd())
+
+  // Wiki memory mode replaces Memory v2 at runtime. When enabled the wiki
+  // path must exist and contain an index.md to be usable; otherwise fall back
+  // to normal Memory v2 so a broken wiki config never disables memory.
+  const wikiConfig = resolveWikiConfig(loadUserConfig().wiki)
+  const wikiPathUsable =
+    Boolean(wikiConfig.enabled && wikiConfig.path) &&
+    fs.existsSync(wikiConfig.path) &&
+    fs.statSync(wikiConfig.path).isDirectory() &&
+    fs.existsSync(path.join(wikiConfig.path, 'index.md'))
+  const wikiMemory = wikiPathUsable ? { path: wikiConfig.path } : undefined
+  let memoryService: MemoryService | undefined
+  if (!wikiMemory) {
+    memoryService = new MemoryService({
+      // Authentication can change inside the running product via /login or
+      // /logout, so resolve against a fresh provider registry when the memory
+      // worker starts a later background job.
+      resolveModel: (id) => createModelRegistry().languageModel(id as `${string}:${string}`),
+    })
+    memoryServiceForShutdown = memoryService
+    memoryService.setActiveModelId(modelId)
+    await memoryService.initialize(process.cwd())
+  }
 
   // --plugin-debug / YGY_PLUGIN_DEBUG=1: mirror plugin/hook/marketplace
   // debugLog breadcrumbs to stderr so they're visible live without
@@ -445,6 +453,7 @@ async function main() {
     permissionMode: argv.plan ? 'plan' : 'default',
     modelRegistry: providerRegistry,
     memoryService,
+    wikiMemory,
     subAgentRegistry,
     skillRegistry,
     mcpRegistry: mcpLoadResult.registry,
