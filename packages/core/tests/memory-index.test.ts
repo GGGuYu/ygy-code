@@ -11,11 +11,11 @@ import { topicMarkdown } from './memory-test-helpers.js'
 
 describe('MemoryIndex', () => {
   it('normalizes Unicode, identifiers, Windows paths, and script-independent n-grams', () => {
-    expect(normalizeMemoryText('D:\\Res\\ygy-code')).toBe('d:/res/x code cli')
+    expect(normalizeMemoryText('D:\\Res\\ygy-code')).toBe('d:/res/ygy code')
     expect(tokenizeMemoryText('MemoryService αβγδ')).toEqual(
       expect.arrayContaining(['memoryservice', 'memory', 'service', 'αβ', 'βγ', 'αβγ']),
     )
-    expect(tokenizeMemoryText('ygy-code')).toEqual(expect.arrayContaining(['ygy-code', 'x', 'code', 'cli']))
+    expect(tokenizeMemoryText('ygy-code')).toEqual(expect.arrayContaining(['ygy-code', 'ygy', 'code']))
     expect(tokenizeMemoryText('αβTypeScriptγδ')).toEqual(expect.arrayContaining(['αβ', 'γδ']))
     expect(extractMemoryIdentifiers('react-dom failed in @scope/tool with TS2322')).toEqual(
       expect.arrayContaining(['react-dom', '@scope/tool', 'TS2322']),
