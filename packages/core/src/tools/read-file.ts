@@ -67,7 +67,10 @@ export interface ReadFileCacheEntry {
 /** Session-scoped map of absolute path → last-delivered fingerprint. Lives on
  *  LoopState so each agent (including sub-agents, which get a fresh
  *  LoopState) has its own isolated cache and one agent's reads never make
- *  another agent's reads return a stub for a file it never saw. */
+ *  another agent's reads return a stub for a file it never saw.
+ *  Doubles as the OCC read-state for write tools: file-write-guard.ts
+ *  refuses writeFile/edit on an existing file whose fingerprint no longer
+ *  matches this map, so content the model never saw can't be clobbered. */
 export type ReadFileCache = Map<string, ReadFileCacheEntry>
 
 export interface ReadFileToolOptions {

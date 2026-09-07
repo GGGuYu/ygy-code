@@ -18,6 +18,7 @@ import { BROWSER_VISUAL_CHECK_TOOL_NAME } from '../tools/browser-visual-check.js
 import { applyBatchEdits, normalizeEditInput, normalizedEditRecord } from '../tools/edit-apply.js'
 import { MAX_TOOL_RESULT_BYTES, truncateToolResult } from '../tools/index.js'
 import { clearProgressReporter, reportProgress } from '../tools/progress.js'
+import type { ReadFileCache } from '../tools/read-file.js'
 import { applySedSubstitution, parseSedEditCommand } from '../tools/sed-edit-parser.js'
 import { formatShellExecutionResult } from '../tools/shell-session/format.js'
 import {
@@ -40,6 +41,7 @@ import { YGY_DIR, debugLog, isAbortError } from '../utils.js'
 import { runBrowserVisualCheck } from './browser/visual-check.js'
 import { createBuiltInToolHandlers } from './built-in-tool-handlers.js'
 import { computeEditDiff } from './diff.js'
+import { recordWriteFingerprint, verifyFileUnchangedSinceRead } from './file-write-guard.js'
 import { checkForLoop, recordToolCall } from './loop-guard.js'
 import type { LoopState } from './loop-state.js'
 import { isManagedMemoryAccess, isManagedMemoryMutation } from './managed-memory-boundary.js'
@@ -79,13 +81,20 @@ function countOccurrences(content: string, search: string): number {
  *  `callbacks.onFileEdit` (when defined) with the structured patch so the
  *  UI can render a colored diff under the tool bullet. The diff payload is
  *  a UI-only side channel — it never lands in `state.messages` and the
- *  model only sees the short result string. */
-async function executeWriteTool(
+ *  model only sees the short result string.
+ *
+ *  `readCache` is LoopState.readFileCache — the same map readFile uses for
+ *  delivery de-dup. Before touching the filesystem we verify the target
+ *  still matches the fingerprint of the agent's last read (OCC); after a
+ *  successful write we refresh it so consecutive writes pass and the next
+ *  readFile hits the de-dup stub. See file-write-guard.ts. */
+export async function executeWriteTool(
   toolName: string,
   input: Record<string, unknown>,
   toolCallId: string,
   callbacks: AgentCallbacks,
   signal: AbortSignal | undefined,
+  readCache: ReadFileCache | undefined,
   beforeWrite: (filePath: string) => Promise<void>,
 ): Promise<string> {
   if (toolName === 'writeFile') {
@@ -93,6 +102,8 @@ async function executeWriteTool(
     const content = input.content as string
     reportProgress(toolCallId, `Writing ${filePath}`)
     await fs.mkdir(path.dirname(filePath), { recursive: true })
+    const unchanged = await verifyFileUnchangedSinceRead(readCache, filePath)
+    if (unchanged) return toolErrorString(unchanged)
     // Read old content BEFORE writing so we can diff. Treat any read
     // failure as "file did not exist" — covers the common ENOENT path
     // plus permission / EISDIR edge cases (we'd error on write anyway).
@@ -104,6 +115,7 @@ async function executeWriteTool(
     }
     await beforeWrite(filePath)
     await fs.writeFile(filePath, content, { encoding: 'utf-8', signal })
+    await recordWriteFingerprint(readCache, filePath)
     const isNew = oldContent === null
     const parts = content.split('\n')
     const lineCount = content.endsWith('\n') ? parts.length - 1 : parts.length
@@ -126,12 +138,15 @@ async function executeWriteTool(
       if (signal?.aborted) throw signal.reason ?? new Error('Edit interrupted by user')
       await beforeWrite(filePath)
       await fs.writeFile(filePath, newContent, { encoding: 'utf-8', signal })
+      await recordWriteFingerprint(readCache, filePath)
 
       const payload = computeEditDiff(filePath, oldContent, newContent)
       if (payload && callbacks.onFileEdit) callbacks.onFileEdit(toolCallId, payload)
     }
 
     reportProgress(toolCallId, `Editing ${filePath}`)
+    const unchanged = await verifyFileUnchangedSinceRead(readCache, filePath)
+    if (unchanged) return toolErrorString(unchanged)
     const content = await fs.readFile(filePath, { encoding: 'utf-8', signal })
     if (Array.isArray(edits)) {
       const newContent = applyBatchEdits(content, edits)
@@ -886,7 +901,15 @@ async function executeWriteOrShell(ctx: HandlerCtx): Promise<{
         state.checkpointFileCache.delete(absPath)
         trackedPath = absPath
       }
-      const output = await executeWriteTool(toolName, input, toolCallId, callbacks, options.abortSignal, beforeWrite)
+      const output = await executeWriteTool(
+        toolName,
+        input,
+        toolCallId,
+        callbacks,
+        options.abortSignal,
+        state.readFileCache,
+        beforeWrite,
+      )
       // executeWriteTool returns "Error: ..." strings for in-band failures
       // (missing match, non-unique match) rather than throwing — surface
       // those as errored results so the scrollback line flips to red.
@@ -912,10 +935,13 @@ async function executeWriteOrShell(ctx: HandlerCtx): Promise<{
           const original = await fs.readFile(absPath, { encoding: 'utf-8', signal: options.abortSignal })
           const newContent = applySedSubstitution(original, sedInfo)
           if (original !== newContent) {
+            const unchanged = await verifyFileUnchangedSinceRead(state.readFileCache, absPath)
+            if (unchanged) return { output: toolErrorString(unchanged), isError: true }
             await captureFileBeforeMutation(state, absPath, state.projectCwd, options.abortSignal)
             state.filesModified.add(absPath)
             state.checkpointFileCache.delete(absPath)
             await fs.writeFile(absPath, newContent, { encoding: 'utf-8', signal: options.abortSignal })
+            await recordWriteFingerprint(state.readFileCache, absPath)
             state.turnFilesModified.add(absPath)
             state.visualCheckCallsSinceMutation = 0
           }

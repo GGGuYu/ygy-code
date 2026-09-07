@@ -451,6 +451,10 @@ describe('processToolCalls edit validation', () => {
     const input = { filePath, edits: JSON.stringify(edits) }
     const toolCallId = 'tc-batch-edit'
     const state = createLoopState()
+    // The write guard requires a prior read; record the fingerprint the way
+    // readFile would so the edit reaches the code under test.
+    const readStat = await fs.stat(filePath)
+    state.readFileCache.set(filePath, { mtimeMs: readStat.mtimeMs, size: readStat.size })
     state.messages.push(
       { role: 'user', content: 'edit the file' } as ModelMessage,
       {
@@ -494,6 +498,10 @@ describe('processToolCalls edit validation', () => {
     const toolCallId = 'tc-batch-edit-failure'
     const input = { filePath, edits }
     const state = createLoopState()
+    // Satisfy the read-before-write guard so the batch validation itself is
+    // the failure under test.
+    const readStat = await fs.stat(filePath)
+    state.readFileCache.set(filePath, { mtimeMs: readStat.mtimeMs, size: readStat.size })
     state.messages.push(
       { role: 'user', content: 'edit the file' } as ModelMessage,
       {
@@ -646,6 +654,8 @@ describe('processToolCalls visual-check retry policy', () => {
     const toolCallId = 'tc-visual-budget-edit'
     const input = { filePath, oldString: 'before', newString: 'after' }
     const state = createLoopState()
+    const readStat = await fs.stat(filePath)
+    state.readFileCache.set(filePath, { mtimeMs: readStat.mtimeMs, size: readStat.size })
     state.visualCheckCallsSinceMutation = 3
     state.messages.push(
       { role: 'user', content: 'fix the page' } as ModelMessage,
@@ -672,6 +682,8 @@ describe('processToolCalls rewind origin capture', () => {
     const checkpoint = await createCheckpoint(state, 'rewrite existing', dir)
     const toolCallId = 'tc-write-rewind'
     const input = { filePath, content: 'changed' }
+    const readStat = await fs.stat(filePath)
+    state.readFileCache.set(filePath, { mtimeMs: readStat.mtimeMs, size: readStat.size })
     state.messages.push(
       { role: 'user', content: 'rewrite the file' } as ModelMessage,
       {
