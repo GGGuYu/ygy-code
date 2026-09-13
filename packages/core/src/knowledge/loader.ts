@@ -24,7 +24,7 @@ import path from 'node:path'
 
 import { fileExists, readFileSafe, userYgyDir } from '../utils.js'
 import type { MemoryService } from './memory/service.js'
-import { buildWikiMemoryContext } from './wiki-memory.js'
+import { buildWikiMemoryPointer } from './wiki-memory.js'
 import type { WikiMemory } from './wiki-memory.js'
 
 /** Filenames recognised at each directory, tried in order. The first one
@@ -110,13 +110,15 @@ export async function buildKnowledgeContext(options?: {
     )
   }
 
-  // The memory slot is exclusive: when wiki memory mode is configured the
-  // wiki usage rules replace the Memory v2 core profile. AGENTS.md layers
+  // The memory slot is exclusive: when wiki memory mode is configured a
+  // one-line pointer replaces the Memory v2 core profile. The full wiki SOP
+  // is NOT resident here — it is delivered on demand by the wikiMemory tool
+  // (progressive disclosure; see tools/wiki-memory.ts). AGENTS.md layers
   // above/below are untouched.
   if (options?.wikiMemory) {
-    const wikiMemoryContent = await buildWikiMemoryContext(options.wikiMemory)
-    if (wikiMemoryContent) {
-      pushUniqueSection('### Wiki 记忆（外部长期记忆）', wikiMemoryContent)
+    const wikiMemoryPointer = await buildWikiMemoryPointer(options.wikiMemory)
+    if (wikiMemoryPointer) {
+      pushUniqueSection('### Wiki 记忆（外部长期记忆）', wikiMemoryPointer)
     }
   } else {
     const userMemoryContent = options?.memoryService?.getCoreProfile().trim()

@@ -59,6 +59,8 @@ const rules: Record<string, (input: PermissionInput) => PermissionLevel> = {
   webSearch: () => 'always-allow',
   webFetch: () => 'always-allow',
   askUser: () => 'always-allow',
+  // Injects the wiki usage SOP as a tool result — read-only, side-effect-free.
+  wikiMemory: () => 'always-allow',
   edit: () => 'ask',
   writeFile: () => 'ask',
   shell: resolveShellPermission,

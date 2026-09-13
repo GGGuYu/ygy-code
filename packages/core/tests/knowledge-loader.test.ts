@@ -37,7 +37,7 @@ describe('buildKnowledgeContext deterministic deduplication', () => {
 })
 
 describe('buildKnowledgeContext wiki memory mode', () => {
-  it('injects wiki usage rules instead of the Memory v2 core profile', async () => {
+  it('injects a one-line wiki pointer instead of the full SOP (progressive disclosure)', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ygy-code-knowledge-wiki-'))
     temporaryDirectories.push(root)
     const userDir = path.join(root, 'user')
@@ -58,10 +58,11 @@ describe('buildKnowledgeContext wiki memory mode', () => {
 
     expect(context).toContain('### Wiki 记忆（外部长期记忆）')
     expect(context).toContain(wikiDir)
-    expect(context).toContain('index.md')
-    expect(context).toContain('.pageindex')
-    expect(context).toContain('wiki-standards.md')
-    expect(context).toContain('guyu-feishu-llm-wiki')
+    expect(context).toContain('wikiMemory')
+    // The full SOP is delivered on demand by the wikiMemory tool, not resident.
+    expect(context).not.toContain('guyu-feishu-llm-wiki')
+    expect(context).not.toContain('.pageindex')
+    expect(context).not.toContain('wiki-standards.md')
     expect(context).not.toContain('### User Auto Memory')
     expect(context).toContain('### Project AGENTS.md')
     expect(context).toContain('project rule')

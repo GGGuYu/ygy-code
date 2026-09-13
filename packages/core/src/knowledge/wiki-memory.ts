@@ -57,3 +57,15 @@ export async function buildWikiMemoryContext(wiki: WikiMemory): Promise<string> 
   const rules = WIKI_MEMORY_RULES.replace(/\{path\}/g, () => wiki.path).replace(/\{realPath\}/g, () => realPath)
   return `${rules}${standardsAvailable ? '' : '\n\n（注意：当前 wiki 没有 tools/wiki-standards.md，仍遵循上述通用规范。）'}`
 }
+
+/** One-line resident pointer for the knowledge section. Keeps the wiki
+ *  discoverable without paying the full SOP on every turn; the SOP itself
+ *  arrives via the wikiMemory tool when the model decides it needs long-term
+ *  memory. Same dual-channel shape as the Available Skills block +
+ *  activateSkill. Returns '' when the path is unusable (loader skips the
+ *  section entirely). */
+export async function buildWikiMemoryPointer(wiki: WikiMemory): Promise<string> {
+  if (!wiki.path) return ''
+  if (!(await isDir(wiki.path))) return ''
+  return `外部 Markdown wiki 长期记忆已配置（${wiki.path}）。任务涉及过往经验、个人偏好、项目档案等历史上下文时，先调用 wikiMemory 工具获取使用说明，再按说明检索 wiki。普通编码任务无需调用。`
+}
