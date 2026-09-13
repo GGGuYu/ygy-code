@@ -10,6 +10,7 @@ import path from 'node:path'
 
 import {
   type Embedder,
+  type Reranker,
   WIKI_RAG_MODEL_ID,
   buildWikiRagIndex,
   loadWikiRagIndex,
@@ -51,6 +52,21 @@ function countingEmbedder() {
     return texts.map(fakeVector)
   }
   return { embedder, callCount: () => calls }
+}
+
+// ── Deterministic fake reranker ───────────────────────────────────────────
+// keywordReranker mimics a cross-encoder: texts containing the needle score
+// 0.9, everything else 0.1 (ties keep vector order via stable sort).
+// offlineReranker stands in for the default Transformers.js reranker in the
+// tool-level tests — throwing makes them exercise the degrade-to-vector path
+// instead of downloading the real model.
+
+function keywordReranker(needle: string): Reranker {
+  return async (_query, texts) => texts.map((text) => (text.includes(needle) ? 0.9 : 0.1))
+}
+
+const offlineReranker: Reranker = async () => {
+  throw new Error('reranker offline')
 }
 
 // ── Fixture wiki ──────────────────────────────────────────────────────────
@@ -238,7 +254,7 @@ describe('createWikiRagTool', () => {
     const wikiDir = await makeWiki()
     const realWiki = await fs.realpath(wikiDir)
     const { embedder } = countingEmbedder()
-    const definition = createWikiRagTool({ path: wikiDir }, embedder) as any
+    const definition = createWikiRagTool({ path: wikiDir }, embedder, offlineReranker) as any
 
     expect(WIKI_RAG_TOOL_NAME).toBe('wikiRag')
     expect(definition.description).toContain('long-term memory')
@@ -258,7 +274,7 @@ describe('createWikiRagTool', () => {
     await withTempHome()
     const wikiDir = await makeWiki()
     const { embedder, callCount } = countingEmbedder()
-    const definition = createWikiRagTool({ path: wikiDir }, embedder) as any
+    const definition = createWikiRagTool({ path: wikiDir }, embedder, offlineReranker) as any
 
     await definition.execute({ query: 'beta 查询' }, { toolCallId: 'tc-rag-2a' })
     const afterFirst = callCount()
@@ -275,7 +291,7 @@ describe('createWikiRagTool', () => {
     const failing: Embedder = async () => {
       throw new Error('model offline')
     }
-    const definition = createWikiRagTool({ path: wikiDir }, failing) as any
+    const definition = createWikiRagTool({ path: wikiDir }, failing, offlineReranker) as any
 
     const result: string = await definition.execute({ query: 'anything' }, { toolCallId: 'tc-rag-3' })
     expect(result).toContain('wiki-rag 不可用')
@@ -288,10 +304,85 @@ describe('createWikiRagTool', () => {
     await withTempHome()
     const root = await makeTempDir('ygy-code-wiki-rag-missing-')
     const missing = path.join(root, 'does-not-exist')
-    const definition = createWikiRagTool({ path: missing }, async (texts) => texts.map(fakeVector)) as any
+    const embedder: Embedder = async (texts) => texts.map(fakeVector)
+    const definition = createWikiRagTool({ path: missing }, embedder, offlineReranker) as any
 
     const result: string = await definition.execute({ query: 'anything' }, { toolCallId: 'tc-rag-4' })
     expect(result).toContain('wiki-rag 不可用')
     expect(result).toContain(missing)
+  })
+})
+
+// ── Rerank (two-stage retrieval) ──────────────────────────────────────────
+
+describe('wiki-rag rerank', () => {
+  it('recalls a wider pool and lets the cross-encoder invert the vector order', async () => {
+    await withTempHome()
+    const realWiki = await fs.realpath(await makeWiki())
+    const embedder: Embedder = async (texts) => texts.map(fakeVector)
+    const index = await buildWikiRagIndex(realWiki, embedder)
+
+    // Vector-only baseline: the C-section (cosine 1.0 with the query) ranks
+    // first; tools.md sits mid-pack (rank 3 of 6) behind two foo chunks.
+    const allVector = await searchWikiRag(index, embedder, 'C 查询', 6)
+    expect(allVector[0].chunk.title).toBe('foo 文档 > alpha 子节点 > C 第三层')
+    expect(allVector.map((hit) => hit.chunk.file).indexOf('tools.md')).toBe(2)
+
+    // The keyword cross-encoder lifts tools.md over both chunks the vector
+    // stage ranked higher; its 0.1-score ties keep vector order among the rest
+    // (stable sort).
+    const hits = await searchWikiRag(index, embedder, 'C 查询', 5, keywordReranker('zulu'))
+    expect(hits).toHaveLength(5)
+    expect(hits[0].chunk.file).toBe('tools.md')
+    expect(hits[0].score).toBe(0.9)
+    expect(hits.slice(1).map((hit) => hit.chunk.title)).toEqual(
+      allVector
+        .filter((hit) => hit.chunk.file !== 'tools.md')
+        .slice(0, 4)
+        .map((hit) => hit.chunk.title),
+    )
+  })
+
+  it('degrades to pure vector order without throwing when the reranker fails', async () => {
+    await withTempHome()
+    const realWiki = await fs.realpath(await makeWiki())
+    const embedder: Embedder = async (texts) => texts.map(fakeVector)
+    const index = await buildWikiRagIndex(realWiki, embedder)
+
+    const hits = await searchWikiRag(index, embedder, 'C 查询', 5, offlineReranker)
+    expect(hits).toHaveLength(5)
+    const plain = await searchWikiRag(index, embedder, 'C 查询', 5)
+    expect(hits.map((hit) => hit.chunk.title)).toEqual(plain.map((hit) => hit.chunk.title))
+    expect(hits[0].chunk.title).toBe('foo 文档 > alpha 子节点 > C 第三层')
+  })
+
+  it('marks hits reranked only when the cross-encoder actually scored them', async () => {
+    await withTempHome()
+    const realWiki = await fs.realpath(await makeWiki())
+    const embedder: Embedder = async (texts) => texts.map(fakeVector)
+    const index = await buildWikiRagIndex(realWiki, embedder)
+
+    const plain = await searchWikiRag(index, embedder, 'C 查询', 5)
+    expect(plain.every((hit) => hit.reranked)).toBe(false)
+    const reranked = await searchWikiRag(index, embedder, 'C 查询', 5, keywordReranker('zulu'))
+    expect(reranked.every((hit) => hit.reranked)).toBe(true)
+  })
+
+  it('notes two-stage retrieval in the tool output only when reranking succeeded', async () => {
+    await withTempHome()
+    const wikiDir = await makeWiki()
+    const { embedder } = countingEmbedder()
+    const rerankedTool = createWikiRagTool({ path: wikiDir }, embedder, keywordReranker('zulu')) as any
+
+    const reranked: string = await rerankedTool.execute({ query: 'C 查询' }, { toolCallId: 'tc-rag-5a' })
+    expect(reranked).toContain('[1] tools.md')
+    expect(reranked).toContain('（两阶段检索：向量召回 20 → bge-reranker-base 精排 top 5）')
+
+    // Second tool with a failing reranker reuses the persisted index and must
+    // not claim two-stage precision it did not have.
+    const plainTool = createWikiRagTool({ path: wikiDir }, embedder, offlineReranker) as any
+    const plain: string = await plainTool.execute({ query: 'C 查询' }, { toolCallId: 'tc-rag-5b' })
+    expect(plain).not.toContain('两阶段检索')
+    expect(plain).toContain('[1] personal/foo.md :9-14')
   })
 })

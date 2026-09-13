@@ -18,6 +18,19 @@
 // mtime validation in this MVP (delete the file to force a rebuild) — both
 // are left for a later iteration. Search is a plain dot product over all
 // chunk vectors (they are L2-normalized, so dot = cosine), top-K.
+//
+// Search becomes two-stage when a Reranker is injected: the dot product only
+// recalls a top-recallK candidate pool, then a local cross-encoder
+// (Xenova/bge-reranker-base, same lazy-load / catch-and-clear-cache pattern
+// as the embedder) rescore each (query, passage) pair and the pool is
+// reordered by that relevance. Reranker failures degrade to the plain vector
+// order — precision must never break the retrieval that works without it.
+// NOTE on the Transformers.js call shape: in 4.2.0 the text-classification
+// pipeline's _call drops a `text_pair` option (only top_k is forwarded) and
+// softmaxes the reranker's single logit to a constant 1.0, so pairs are
+// scored through the pipeline's public tokenizer/model — the same pattern
+// the library's own zero-shot-classification pipeline uses: tokenize with
+// { text_pair, padding, truncation }, run the model, sigmoid the raw logit.
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -25,6 +38,9 @@ import { debugLog, fileExists, userYgyDir } from '../utils.js'
 
 /** Local embedding model (Transformers.js, q8 = the old `quantized` flag). */
 export const WIKI_RAG_MODEL_ID = 'Xenova/bge-small-zh-v1.5'
+
+/** Local cross-encoder reranking model (Transformers.js, q8). */
+export const WIKI_RAG_RERANKER_MODEL_ID = 'Xenova/bge-reranker-base'
 
 /** Chunks whose line span is smaller than this are dropped (empty stubs). */
 const MIN_CHUNK_LINES = 3
@@ -35,6 +51,10 @@ const EMBED_BATCH_SIZE = 16
 /** Embeds a batch of texts into L2-normalized vectors. Injectable so tests
  *  never touch Transformers.js or download a model. */
 export type Embedder = (texts: string[]) => Promise<Float32Array[]>
+
+/** Scores each text's relevance to the query ([0, 1], higher = more
+ *  relevant). Injectable for the same reason as Embedder. */
+export type Reranker = (query: string, texts: string[]) => Promise<number[]>
 
 export interface WikiRagChunk {
   /** Wiki-relative md path, e.g. `personal/foo.md`. */
@@ -105,6 +125,50 @@ export function createTransformersEmbedder(): Embedder {
     const output = await extractor(texts, { pooling: 'mean', normalize: true })
     const vectors = output.tolist() as number[][]
     return vectors.map((vector) => Float32Array.from(vector))
+  }
+}
+
+// ── Production reranker (lazy Transformers.js cross-encoder) ──────────────
+
+/** Load the text-classification pipeline wrapping the reranker's tokenizer
+ *  and sequence-classification model; same lazy-import shape as
+ *  loadExtractor. */
+async function loadRerankerPipeline() {
+  const { pipeline } = await import('@huggingface/transformers')
+  return pipeline('text-classification', WIKI_RAG_RERANKER_MODEL_ID, { dtype: 'q8' })
+}
+
+type RerankerPipeline = Awaited<ReturnType<typeof loadRerankerPipeline>>
+
+let rerankerPipelinePromise: Promise<RerankerPipeline> | undefined
+
+/** Reranker backed by local Transformers.js inference, one (query, passage)
+ *  pair at a time. The pipeline's own call cannot score pairs in 4.2.0 —
+ *  `extractor(query, { text_pair })` drops text_pair and softmaxes the
+ *  single logit to 1.0 — so, exactly like the library's zero-shot pipeline,
+ *  we tokenize the pair and run the model through the pipeline's public
+ *  tokenizer/model, then sigmoid the raw relevance logit. */
+export function createTransformersReranker(): Reranker {
+  return async (query, texts) => {
+    if (texts.length === 0) return []
+    if (!rerankerPipelinePromise) {
+      rerankerPipelinePromise = loadRerankerPipeline().catch((error) => {
+        rerankerPipelinePromise = undefined // don't cache a failed load
+        throw error
+      })
+    }
+    const rerankerPipeline = await rerankerPipelinePromise
+    const scores: number[] = []
+    for (const text of texts) {
+      const inputs = rerankerPipeline.tokenizer(query, {
+        text_pair: text,
+        padding: true,
+        truncation: true,
+      })
+      const { logits } = await rerankerPipeline.model(inputs)
+      scores.push(Number(logits.sigmoid().item()))
+    }
+    return scores
   }
 }
 
@@ -226,22 +290,47 @@ function dotProduct(a: Float32Array | number[], b: Float32Array | number[]): num
 
 export interface WikiRagHit {
   chunk: WikiRagChunk
-  /** Cosine similarity — vectors are normalized, so this is a dot product. */
+  /** Vector cosine similarity (vectors are normalized, so a dot product);
+   *  the cross-encoder relevance score instead when `reranked` is set. */
   score: number
+  /** Whether this hit's rank comes from cross-encoder reranking. */
+  reranked: boolean
 }
 
-/** Embed the query and score it against every chunk vector, top-K desc. */
+/** Embed the query and dot-product rank every chunk (vectors are normalized,
+ *  so dot = cosine), top-K desc. With a reranker this becomes two-stage: the
+ *  dot product only recalls the top-recallK pool, the reranker rescore each
+ *  (query, passage) pair, and the pool is reordered by relevance. Reranker
+ *  errors degrade to the plain vector order — reranking must never break the
+ *  search that works without it. */
 export async function searchWikiRag(
   index: WikiRagIndex,
   embedder: Embedder,
   query: string,
   topK = 5,
+  reranker?: Reranker,
+  recallK = 20,
 ): Promise<WikiRagHit[]> {
   const [queryVector] = await embedder([query])
   const hits = index.chunks.map((chunk, i) => ({
     chunk,
     score: dotProduct(queryVector, index.embeddings[i] ?? []),
+    reranked: false,
   }))
   hits.sort((a, b) => b.score - a.score)
-  return hits.slice(0, topK)
+  if (!reranker) return hits.slice(0, topK)
+  const pool = hits.slice(0, Math.max(topK, recallK))
+  let rerankScores: number[]
+  try {
+    rerankScores = await reranker(
+      query,
+      pool.map((hit) => hit.chunk.text),
+    )
+  } catch (error) {
+    debugLog('wiki-rag.rerank-failed', `${query}: ${(error as Error).message}`)
+    return hits.slice(0, topK)
+  }
+  const reranked = pool.map((hit, i) => ({ ...hit, score: rerankScores[i] ?? hit.score, reranked: true }))
+  reranked.sort((a, b) => b.score - a.score)
+  return reranked.slice(0, topK)
 }

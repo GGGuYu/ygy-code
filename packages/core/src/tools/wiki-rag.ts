@@ -7,14 +7,17 @@
 // (root agent, `wiki` config set) — see loop.ts.
 //
 // All heavy lifting lives in knowledge/wiki-rag.ts (chunking, index build /
-// load, search). The embedder is injected; production uses Transformers.js,
-// tests use deterministic fakes so no test ever loads a model or touches the
-// network. Like wikiMemory this maps to `content-read` (it only reads the
-// wiki and the local index cache).
+// load, two-stage search). The embedder and reranker are injected; production
+// uses Transformers.js (bi-encoder recall + cross-encoder rerank), tests use
+// deterministic fakes so no test ever loads a model or touches the network.
+// Like wikiMemory this maps to `content-read` (it only reads the wiki and the
+// local index cache).
 //
 // Execute NEVER throws across the tool boundary — any failure (model load,
 // index build, unreadable wiki) degrades to a short message pointing the
-// model back at grep with the wiki's real path.
+// model back at grep with the wiki's real path. Reranker failures are milder
+// still: searchWikiRag silently falls back to the vector order and the result
+// simply omits the two-stage note.
 import fs from 'node:fs/promises'
 
 import { tool } from 'ai'
@@ -24,8 +27,10 @@ import { z } from 'zod'
 import type { WikiMemory } from '../knowledge/wiki-memory.js'
 import {
   type Embedder,
+  type Reranker,
   buildWikiRagIndex,
   createTransformersEmbedder,
+  createTransformersReranker,
   loadWikiRagIndex,
   saveWikiRagIndex,
   searchWikiRag,
@@ -37,7 +42,11 @@ const TOP_K = 5
 /** Preview length per hit; the model reads full context via readFile. */
 const PREVIEW_CHARS = 400
 
-export function createWikiRagTool(wiki: WikiMemory, embedder: Embedder = createTransformersEmbedder()) {
+export function createWikiRagTool(
+  wiki: WikiMemory,
+  embedder: Embedder = createTransformersEmbedder(),
+  reranker: Reranker = createTransformersReranker(),
+) {
   return tool({
     description:
       "Semantic vector search over the user's external Markdown wiki (their long-term memory). " +
@@ -73,7 +82,7 @@ export function createWikiRagTool(wiki: WikiMemory, embedder: Embedder = createT
           const seconds = ((Date.now() - startedAt) / 1000).toFixed(1)
           buildNote = `（首次构建完成，${index.chunks.length} chunks，耗时 ${seconds}s）\n\n`
         }
-        const hits = await searchWikiRag(index, embedder, query, TOP_K)
+        const hits = await searchWikiRag(index, embedder, query, TOP_K, reranker)
         const sections = hits.map((hit, i) => {
           const preview =
             hit.chunk.text.length > PREVIEW_CHARS ? `${hit.chunk.text.slice(0, PREVIEW_CHARS)}…` : hit.chunk.text
@@ -83,11 +92,17 @@ export function createWikiRagTool(wiki: WikiMemory, embedder: Embedder = createT
             .join('\n')
           return `[${i + 1}] ${hit.chunk.file} :${hit.chunk.startLine}-${hit.chunk.endLine} — ${hit.chunk.title}（score ${hit.score.toFixed(2)}）\n${indented}`
         })
+        // Two-stage note only when the cross-encoder actually reranked the
+        // pool (degraded searches must not claim precision they lacked).
+        const rerankNote = hits.some((hit) => hit.reranked)
+          ? '\n（两阶段检索：向量召回 20 → bge-reranker-base 精排 top 5）'
+          : ''
         return (
           `wiki 语义检索结果（query: ${query}）\n\n` +
           buildNote +
           sections.join('\n\n') +
-          `\n\n提示：对相关段落用 readFile 按行号区间精读原文；需要精确关键词检索时改用 grep。`
+          `\n\n提示：对相关段落用 readFile 按行号区间精读原文；需要精确关键词检索时改用 grep。` +
+          rerankNote
         )
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
