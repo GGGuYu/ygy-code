@@ -61,6 +61,8 @@ const rules: Record<string, (input: PermissionInput) => PermissionLevel> = {
   askUser: () => 'always-allow',
   // Injects the wiki usage SOP as a tool result — read-only, side-effect-free.
   wikiMemory: () => 'always-allow',
+  // Local vector search over the wiki — read-only (index cache write aside).
+  wikiRag: () => 'always-allow',
   edit: () => 'ask',
   writeFile: () => 'ask',
   shell: resolveShellPermission,

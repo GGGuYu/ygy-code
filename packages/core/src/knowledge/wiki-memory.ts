@@ -28,6 +28,9 @@ const WIKI_MEMORY_RULES = `长期记忆系统 = 这个外部 Markdown wiki（Mem
 使用规则：
 1. 新任务先读 {realPath}/index.md 全文，再按关键词 grep 检索是否已有经验；复用优先。
    grep 命令示例：grep -rn "关键词" {realPath}
+1b. 语义检索（wikiRag 工具）：问题涉及过往经验/偏好/项目档案、但你拿不准精确关键词或记不清措辞时，
+   调用 wikiRag 工具做本地向量检索——按语义匹配返回最相关的 5 个段落（文件+行号区间+预览），
+   同义改写、模糊回忆也能命中；拿到结果后按行号 readFile 精读。掌握精确关键词时 grep 更快。
 2. 检索定位到正文 md 后，先检查 PageIndex 树：{realPath}/.pageindex/<正文相对路径去掉 .md>.tree.json。
    树存在 → 先整读该树（标题/层级/行号），再按行号只读需要的原文段落；
    树不存在 ≠ 文章不存在（白名单/短文没有树），直接读原文。

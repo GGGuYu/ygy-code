@@ -192,6 +192,7 @@ const NEVER_TRUNCATE_TOOLS = new Set([
   'task',
   'activateSkill',
   'wikiMemory',
+  'wikiRag',
   'todoWrite',
   'askUser',
   'enterPlanMode',

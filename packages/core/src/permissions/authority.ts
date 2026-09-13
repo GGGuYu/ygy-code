@@ -218,6 +218,7 @@ function classifyBuiltin(
   if (toolName === 'readMcpResource') return { capabilities: ['opaque-mcp'] }
   if (toolName === 'activateSkill') return { capabilities: ['content-read'] }
   if (toolName === 'wikiMemory') return { capabilities: ['content-read'] }
+  if (toolName === 'wikiRag') return { capabilities: ['content-read'] }
   if (toolName === 'getGoal') return { capabilities: ['sensitive-read'] }
   if (['listAgents', 'listMcpResources'].includes(toolName)) {
     return { capabilities: ['session-metadata-read'] }

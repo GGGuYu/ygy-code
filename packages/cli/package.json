@@ -23,6 +23,7 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@napi-rs/canvas": "0.1.80",
     "@vscode/ripgrep": "^1.17.0",
     "fs-ext-extra-prebuilt": "2.2.11",

@@ -33,6 +33,7 @@ import { createTaskTool } from '../tools/task.js'
 import { toolSearch } from '../tools/tool-search.js'
 import { createUpdateGoalTool } from '../tools/update-goal.js'
 import { createWikiMemoryTool } from '../tools/wiki-memory.js'
+import { createWikiRagTool } from '../tools/wiki-rag.js'
 import type { AgentCallbacks, AgentOptions, MessageProvenance, PeerOrigin, QueuedAgentInput } from '../types/index.js'
 import { debugLog, errorMessage, isAbortError } from '../utils.js'
 import { classifyApiError, isContextTooLongError, isImageDataError } from './api-errors.js'
@@ -315,8 +316,11 @@ export function buildTools(options: AgentOptions, state: LoopState) {
 
   // Progressive-disclosure entry point for wiki long-term memory. Root agent
   // only — a sub-agent that needs wiki context gets it relayed by the parent.
+  // wikiRag adds local vector search over the same wiki (grep fails on
+  // paraphrases); same registration conditions as wikiMemory.
   if (!options.toolFilter && options.wikiMemory) {
     tools.wikiMemory = createWikiMemoryTool(options.wikiMemory)
+    tools.wikiRag = createWikiRagTool(options.wikiMemory)
   }
 
   if (!options.toolFilter && options.peerService?.isAvailable()) {

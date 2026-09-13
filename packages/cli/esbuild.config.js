@@ -125,6 +125,8 @@ await esbuild.build({
     'pdf-parse',
     // Tesseract resolves its Node worker relative to its installed package.
     'tesseract.js',
+    // Local wiki-rag embeddings: bundles onnxruntime-node native .node files.
+    '@huggingface/transformers',
     // Native addons that can't be bundled
     '@vscode/ripgrep',
     '@napi-rs/canvas',
